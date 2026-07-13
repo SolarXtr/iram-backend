@@ -1,0 +1,8 @@
+name = "iram-backend"
+main = "src/index.ts"
+compatibility_date = "2026-07-09"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "iram-db"
+database_id = "d813fc54-881b-47b0-b6a0-6774afe3cf2f"
