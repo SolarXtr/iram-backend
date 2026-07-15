@@ -58,18 +58,28 @@ app.post('/api/publications', async (c) => {
       // Ignore errors if table doesn't exist or other issues
     }
 
+    const pubDoi = body.doi || null
+    const pubCitations = parseInt(body.citations) || 0
+    const pubSourceTags = body.databases ? JSON.stringify(body.databases) : JSON.stringify(["Scopus"])
+    const pubAuthors = body.authors ? JSON.stringify(body.authors) : JSON.stringify([authorName])
+    const pubCorr = body.corresponding_author || null
+    const pubDate = body.createdAt || body.coverDate || (body.year ? `${body.year}-01-01` : null) || new Date().toISOString()
+
     if (existing) {
-      // Update statistics and authorship (e.g. quartile, authorId, citations, etc) but DO NOT touch financial/status fields
+      // Update statistics, authorship, doi, citations, sourceTags, authors, and corresponding_author
       await c.env.DB.prepare(`
         UPDATE irPublication 
-        SET quartile = ?, authorId = ?, doi = ?, citations = ?, sourceTags = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        SET quartile = ?, authorId = ?, doi = ?, citations = ?, sourceTags = ?, authors = ?, corresponding_author = ?, createdAt = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?
       `).bind(
         body.quartile || '', 
         authorName, 
-        body.doi || '',
-        body.citations || 0,
-        body.sourceTags ? JSON.stringify(body.sourceTags) : '[]',
+        pubDoi, 
+        pubCitations, 
+        pubSourceTags, 
+        pubAuthors, 
+        pubCorr, 
+        pubDate, 
         existing.id
       ).run()
       
@@ -78,18 +88,21 @@ app.post('/api/publications', async (c) => {
       // Insert new publication
       const id = crypto.randomUUID()
       await c.env.DB.prepare(`
-        INSERT INTO irPublication (id, title, journal, quartile, authorId, doi, citations, sourceTags, status, rewardStatus, rewardAmount)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0)
+        INSERT INTO irPublication (id, title, journal, quartile, authorId, status, rewardStatus, rewardAmount, doi, citations, sourceTags, authors, corresponding_author, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?, ?, ?, ?)
       `).bind(
         id, 
         body.title, 
         body.journal || '', 
         body.quartile || '', 
         authorName,
-        body.doi || '',
-        body.citations || 0,
-        body.sourceTags ? JSON.stringify(body.sourceTags) : '[]',
-        body.status || 'Active'
+        body.status || 'Active',
+        pubDoi,
+        pubCitations,
+        pubSourceTags,
+        pubAuthors,
+        pubCorr,
+        pubDate
       ).run()
       
       return c.json({ status: 'inserted', id })
