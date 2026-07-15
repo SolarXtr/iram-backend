@@ -30,13 +30,21 @@ app.post('/api/publications', async (c) => {
     // Upsert logic based on Title
     const existing = await c.env.DB.prepare('SELECT id, rewardStatus, rewardAmount FROM irPublication WHERE title = ?').bind(body.title).first()
     
+    // Insert dummy user to satisfy foreign key constraint if authorId is a name
+    const authorName = body.authorId || 'Unknown';
+    try {
+      await c.env.DB.prepare('INSERT OR IGNORE INTO irUser (id, email, role, status) VALUES (?, ?, ?, ?)').bind(authorName, `${authorName.replace(/\s+/g, '').toLowerCase()}@nu.ac.th`, 'RESEARCHER', 'ACTIVE').run()
+    } catch(err) {
+      // Ignore errors if table doesn't exist or other issues
+    }
+
     if (existing) {
       // Update statistics and authorship (e.g. quartile, authorId) but DO NOT touch financial/status fields
       await c.env.DB.prepare(`
         UPDATE irPublication 
         SET quartile = ?, authorId = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?
-      `).bind(body.quartile || '', body.authorId || '', existing.id).run()
+      `).bind(body.quartile || '', authorName, existing.id).run()
       
       return c.json({ status: 'updated', id: existing.id, message: 'Existing publication updated (Reward status preserved).' })
     } else {
@@ -50,7 +58,7 @@ app.post('/api/publications', async (c) => {
         body.title, 
         body.journal || '', 
         body.quartile || '', 
-        body.authorId || '',
+        authorName,
         body.status || 'Active'
       ).run()
       
