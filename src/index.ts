@@ -39,26 +39,36 @@ app.post('/api/publications', async (c) => {
     }
 
     if (existing) {
-      // Update statistics and authorship (e.g. quartile, authorId) but DO NOT touch financial/status fields
+      // Update statistics and authorship (e.g. quartile, authorId, citations, etc) but DO NOT touch financial/status fields
       await c.env.DB.prepare(`
         UPDATE irPublication 
-        SET quartile = ?, authorId = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        SET quartile = ?, authorId = ?, doi = ?, citations = ?, sourceTags = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?
-      `).bind(body.quartile || '', authorName, existing.id).run()
+      `).bind(
+        body.quartile || '', 
+        authorName, 
+        body.doi || '',
+        body.citations || 0,
+        body.sourceTags ? JSON.stringify(body.sourceTags) : '[]',
+        existing.id
+      ).run()
       
       return c.json({ status: 'updated', id: existing.id, message: 'Existing publication updated (Reward status preserved).' })
     } else {
       // Insert new publication
       const id = crypto.randomUUID()
       await c.env.DB.prepare(`
-        INSERT INTO irPublication (id, title, journal, quartile, authorId, status, rewardStatus, rewardAmount)
-        VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0)
+        INSERT INTO irPublication (id, title, journal, quartile, authorId, doi, citations, sourceTags, status, rewardStatus, rewardAmount)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0)
       `).bind(
         id, 
         body.title, 
         body.journal || '', 
         body.quartile || '', 
         authorName,
+        body.doi || '',
+        body.citations || 0,
+        body.sourceTags ? JSON.stringify(body.sourceTags) : '[]',
         body.status || 'Active'
       ).run()
       
