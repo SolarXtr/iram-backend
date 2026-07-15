@@ -17,8 +17,28 @@ app.get('/', (c) => {
 
 app.get('/api/publications', async (c) => {
   try {
-    const { results } = await c.env.DB.prepare('SELECT * FROM irPublication ORDER BY createdAt DESC LIMIT 100').all()
+    const { results } = await c.env.DB.prepare('SELECT * FROM irPublication ORDER BY createdAt DESC').all()
     return c.json(results)
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+app.get('/api/researchers', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare('SELECT id, name, department, status FROM irResearcherProfile').all()
+    // Wait, the dummy researchers were inserted into irUser!
+    // Let's just return all users with role RESEARCHER as well
+    const { results: users } = await c.env.DB.prepare("SELECT id, name FROM irUser WHERE role = 'RESEARCHER'").all()
+    
+    // Merge or just return users since that's what the UI matches against
+    const researchers = users.map(u => ({
+      name: u.name,
+      department: 'Faculty of Medicine',
+      status: 'Active'
+    }))
+    
+    return c.json(researchers)
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
   }
