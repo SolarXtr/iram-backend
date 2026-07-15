@@ -31,12 +31,12 @@ app.post('/api/publications', async (c) => {
     const existing = await c.env.DB.prepare('SELECT id, rewardStatus, rewardAmount FROM irPublication WHERE title = ?').bind(body.title).first()
     
     if (existing) {
-      // Update statistics (e.g. quartile, citations if added) but DO NOT touch financial/status fields
+      // Update statistics and authorship (e.g. quartile, authorId) but DO NOT touch financial/status fields
       await c.env.DB.prepare(`
         UPDATE irPublication 
-        SET quartile = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        SET quartile = ?, authorId = ?, updatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE id = ?
-      `).bind(body.quartile || '', existing.id).run()
+      `).bind(body.quartile || '', body.authorId || '', existing.id).run()
       
       return c.json({ status: 'updated', id: existing.id, message: 'Existing publication updated (Reward status preserved).' })
     } else {
