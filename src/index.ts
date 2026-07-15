@@ -33,7 +33,7 @@ app.post('/api/publications', async (c) => {
     // Insert dummy user to satisfy foreign key constraint if authorId is a name
     const authorName = body.authorId || 'Unknown';
     try {
-      await c.env.DB.prepare('INSERT OR IGNORE INTO irUser (id, email, role, status) VALUES (?, ?, ?, ?)').bind(authorName, `${authorName.replace(/\s+/g, '').toLowerCase()}@nu.ac.th`, 'RESEARCHER', 'ACTIVE').run()
+      await c.env.DB.prepare('INSERT OR IGNORE INTO irUser (id, name, email, role) VALUES (?, ?, ?, ?)').bind(authorName, authorName, `${authorName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}@nu.ac.th`, 'RESEARCHER').run()
     } catch(err) {
       // Ignore errors if table doesn't exist or other issues
     }
