@@ -127,4 +127,57 @@ app.post('/api/researchers', async (c) => {
   return c.json({ status: 'deprecated', message: 'Use direct DB imports' })
 })
 
+// === PROJECTS ENDPOINTS ===
+
+app.get('/api/projects', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(`
+      SELECT p.id, p.title, p.status, p.startDate, p.endDate, p.department, p.budgetInitial, p.budgetSpent,
+             u.name as piName 
+      FROM irResearchProject p 
+      LEFT JOIN irUser u ON p.leaderId = u.id
+      ORDER BY p.createdAt DESC
+    `).all();
+    return c.json(results);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// === FUNDING ENDPOINTS ===
+
+app.get('/api/funding', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(`
+      SELECT p.id, p.title as projectTitle, p.status, 
+             p.budgetInitial as amount, p.budgetSpent,
+             u.name as piName
+      FROM irResearchProject p 
+      LEFT JOIN irUser u ON p.leaderId = u.id
+      WHERE p.budgetInitial > 0
+      ORDER BY p.createdAt DESC
+    `).all();
+    return c.json(results);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// === CONFERENCES ENDPOINTS ===
+
+app.get('/api/conferences', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(`
+      SELECT c.id, c.title, c.conference, c.type, c.status,
+             u.name as presenterName 
+      FROM irPresentation c 
+      LEFT JOIN irUser u ON c.presenterId = u.id
+      ORDER BY c.createdAt DESC
+    `).all();
+    return c.json(results);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 export default app
