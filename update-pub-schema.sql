@@ -6,6 +6,9 @@ CREATE TABLE "irPublication" (
     "doi" TEXT UNIQUE,
     "title" TEXT NOT NULL,
     "journal" TEXT NOT NULL,
+    "year" INTEGER,
+    "coverDate" TEXT,
+    "citations" INTEGER DEFAULT 0,
     "quartile" TEXT NOT NULL, -- 'Q1', 'Q2', 'Q3', 'Q4'
     "uniRewardStatus" TEXT DEFAULT 'PENDING', -- 'PENDING', 'APPROVED', 'REJECTED'
     "uniRewardAmount" REAL DEFAULT 0.0,
@@ -14,6 +17,7 @@ CREATE TABLE "irPublication" (
     "status" TEXT NOT NULL, -- 'WRITING', 'SUBMITTED', 'UNDER_REVIEW', 'PUBLISHED', 'REWARDED'
     "projectId" TEXT,
     "claimingAuthorId" TEXT,
+    "sourceDatabases" TEXT DEFAULT '["Scopus"]',
     "isDeleted" INTEGER DEFAULT 0,
     "createdAt" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     "updatedAt" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

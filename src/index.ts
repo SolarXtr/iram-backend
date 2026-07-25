@@ -33,17 +33,27 @@ app.get('/api/publications', async (c) => {
 app.post('/api/publications/import', async (c) => {
   try {
     const body = await c.req.json()
-    const { doi, title, journal, year, coverDate, quartile, status, authors } = body
+    const { doi, title, journal, year, coverDate, citations, quartile, status, authors, databases } = body
+    const sourceDbStr = databases ? JSON.stringify(databases) : '["Scopus"]'
 
     // 1. Duplicate Check
-    const existing = await c.env.DB.prepare('SELECT id FROM irPublication WHERE doi = ? OR title = ?').bind(doi || null, title).first()
+    const existing = await c.env.DB.prepare('SELECT id, sourceDatabases FROM irPublication WHERE doi = ? OR title = ?').bind(doi || null, title).first()
     
     if (existing) {
-      // Update year and coverDate if missing for existing publication
-      if (year || coverDate) {
-        await c.env.DB.prepare('UPDATE irPublication SET year = COALESCE(?, year), coverDate = COALESCE(?, coverDate) WHERE id = ?').bind(year || null, coverDate || null, existing.id).run()
-      }
-      return c.json({ status: 'skipped', id: existing.id, message: 'Publication already exists, updated year/coverDate if provided' })
+      // Merge databases if needed
+      let existingDbs: string[] = []
+      try {
+        existingDbs = JSON.parse((existing as any).sourceDatabases || '["Scopus"]')
+      } catch (e) {}
+      
+      const newDbs = databases || ["Scopus"]
+      const mergedDbs = Array.from(new Set([...existingDbs, ...newDbs]))
+      const mergedDbStr = JSON.stringify(mergedDbs)
+
+      // Update year, coverDate, citations, and sourceDatabases for existing publication
+      await c.env.DB.prepare('UPDATE irPublication SET year = COALESCE(?, year), coverDate = COALESCE(?, coverDate), citations = COALESCE(?, citations), sourceDatabases = ? WHERE id = ?').bind(year || null, coverDate || null, citations ?? null, mergedDbStr, existing.id).run()
+      
+      return c.json({ status: 'skipped', id: existing.id, message: 'Publication already exists, updated year/coverDate/citations/databases if provided' })
     }
 
     // 2. Identify claimingAuthorId based on eligibility rules
@@ -79,9 +89,9 @@ app.post('/api/publications/import', async (c) => {
     // 3. Insert into irPublication
     const pubId = crypto.randomUUID()
     await c.env.DB.prepare(`
-      INSERT INTO irPublication (id, doi, title, journal, year, coverDate, quartile, uniRewardStatus, uniRewardAmount, facultyRewardStatus, facultyRewardAmount, status, projectId, claimingAuthorId)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 'PENDING', 0, ?, NULL, ?)
-    `).bind(pubId, doi || null, title, journal || '', year || null, coverDate || null, quartile || '', status || 'PUBLISHED', claimingAuthorId).run()
+      INSERT INTO irPublication (id, doi, title, journal, year, coverDate, citations, quartile, uniRewardStatus, uniRewardAmount, facultyRewardStatus, facultyRewardAmount, status, projectId, claimingAuthorId, sourceDatabases)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 'PENDING', 0, ?, NULL, ?, ?)
+    `).bind(pubId, doi || null, title, journal || '', year || null, coverDate || null, citations ?? 0, quartile || '', status || 'PUBLISHED', claimingAuthorId, sourceDbStr).run()
 
     // 4. Insert into irPublicationAuthor
     for (const auth of authorsWithUserId) {
@@ -108,6 +118,7 @@ app.get('/api/researchers', async (c) => {
         u.name, 
         COALESCE(p.department, 'Faculty of Medicine') as department,
         COALESCE(p.status, 'Active') as status,
+        p.orcid,
         (SELECT COUNT(DISTINCT pa.publicationId) FROM irPublicationAuthor pa WHERE pa.userId = u.id) as publications_count,
         (SELECT COUNT(rp.id) FROM irResearchProject rp WHERE rp.leaderId = u.id) as projects_count
       FROM irUser u
@@ -125,6 +136,29 @@ app.get('/api/researchers', async (c) => {
 app.post('/api/researchers', async (c) => {
   // Keeping old researcher sync code intact
   return c.json({ status: 'deprecated', message: 'Use direct DB imports' })
+})
+
+app.put('/api/researchers/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const { orcid } = body;
+    
+    if (orcid !== undefined) {
+      // Find the researcher profile by id (which maps to u.id in the GET request, but let's check if the ID passed is user id or profile id)
+      // In the GET request: SELECT u.id ... FROM irUser u LEFT JOIN irResearcherProfile p ON u.id = p.userId
+      // So the id being passed is irUser.id. We need to update irResearcherProfile where userId = id
+      await c.env.DB.prepare(`
+        UPDATE irResearcherProfile 
+        SET orcid = ? 
+        WHERE userId = ?
+      `).bind(orcid, id).run();
+    }
+    
+    return c.json({ status: 'updated', id });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
 })
 
 // === PROJECTS ENDPOINTS ===
@@ -173,6 +207,76 @@ app.get('/api/conferences', async (c) => {
       FROM irPresentation c 
       LEFT JOIN irUser u ON c.presenterId = u.id
       ORDER BY c.createdAt DESC
+    `).all();
+    return c.json(results);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// === ANALYTICS ENDPOINTS ===
+
+app.post('/api/analytics/view', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { domain, path, sessionId, userAgent } = body;
+    
+    if (!domain || !path || !sessionId) {
+      return c.json({ error: 'Missing required fields' }, 400);
+    }
+
+    // Check if same session visited same path in last 30 minutes
+    const recentView = await c.env.DB.prepare(`
+      SELECT id FROM irPageViews 
+      WHERE sessionId = ? AND domain = ? AND path = ? 
+      AND timestamp >= datetime('now', '-30 minutes')
+    `).bind(sessionId, domain, path).first();
+
+    if (recentView) {
+      return c.json({ status: 'skipped', message: 'Already recorded recently for this session' });
+    }
+
+    const viewId = crypto.randomUUID();
+    await c.env.DB.prepare(`
+      INSERT INTO irPageViews (id, domain, path, sessionId, userAgent)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(viewId, domain, path, sessionId, userAgent || null).run();
+
+    return c.json({ status: 'recorded', id: viewId });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+app.get('/api/analytics/summary', async (c) => {
+  try {
+    // Return aggregate counts (total, today, this month) grouped by domain and path
+    const { results } = await c.env.DB.prepare(`
+      SELECT domain, path, 
+             COUNT(id) as totalViews,
+             SUM(CASE WHEN date(timestamp) = date('now') THEN 1 ELSE 0 END) as viewsToday,
+             SUM(CASE WHEN strftime('%Y-%m', timestamp) = strftime('%Y-%m', 'now') THEN 1 ELSE 0 END) as viewsThisMonth
+      FROM irPageViews
+      GROUP BY domain, path
+      ORDER BY totalViews DESC
+    `).all();
+    
+    return c.json(results);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// === PROJECTS ENDPOINTS ===
+
+app.get('/api/projects', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(`
+      SELECT p.id, p.title, p.status, p.startDate, p.endDate, p.budgetInitial,
+             u.name as leaderName 
+      FROM irResearchProject p
+      LEFT JOIN irUser u ON p.leaderId = u.id
+      ORDER BY p.startDate DESC
     `).all();
     return c.json(results);
   } catch (e: any) {
