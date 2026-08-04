@@ -108,6 +108,26 @@ app.post('/api/publications/import', async (c) => {
   }
 })
 
+app.put('/api/publications/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const { quartile } = body;
+
+    if (quartile !== undefined) {
+      await c.env.DB.prepare(`
+        UPDATE irPublication 
+        SET quartile = ? 
+        WHERE id = ?
+      `).bind(quartile, id).run();
+    }
+    
+    return c.json({ status: 'updated', id });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+})
+
 // === RESEARCHERS ENDPOINTS ===
 
 app.get('/api/researchers', async (c) => {
