@@ -309,6 +309,28 @@ app.get('/api/analytics/summary', async (c) => {
   }
 });
 
+  app.get('/api/analytics/dashboard', async (c) => {
+    try {
+      const db = c.env.DB;
+      
+      const deviceStats = await db.prepare(`SELECT deviceType as label, COUNT(id) as count FROM irPageViews GROUP BY deviceType ORDER BY count DESC`).all();
+      const countryStats = await db.prepare(`SELECT country as label, COUNT(id) as count FROM irPageViews GROUP BY country ORDER BY count DESC LIMIT 10`).all();
+      const resolutionStats = await db.prepare(`SELECT resolution as label, COUNT(id) as count FROM irPageViews WHERE resolution IS NOT NULL GROUP BY resolution ORDER BY count DESC LIMIT 10`).all();
+      const referrerStats = await db.prepare(`SELECT referrer as label, COUNT(id) as count FROM irPageViews WHERE referrer IS NOT NULL AND referrer != '' GROUP BY referrer ORDER BY count DESC LIMIT 10`).all();
+      const trendStats = await db.prepare(`SELECT date(timestamp) as date, COUNT(id) as count FROM irPageViews WHERE timestamp >= datetime('now', '-30 days') GROUP BY date(timestamp) ORDER BY date(timestamp) ASC`).all();
+
+      return c.json({
+        devices: deviceStats.results,
+        countries: countryStats.results,
+        resolutions: resolutionStats.results,
+        referrers: referrerStats.results,
+        trend: trendStats.results
+      });
+    } catch (e: any) {
+      return c.json({ error: e.message }, 500);
+    }
+  });
+
 // === PROJECTS ENDPOINTS ===
 
 app.get('/api/projects', async (c) => {
