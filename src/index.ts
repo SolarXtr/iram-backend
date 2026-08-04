@@ -19,7 +19,7 @@ app.get('/api/publications', async (c) => {
   try {
     const { results } = await c.env.DB.prepare(`
       SELECT p.*, 
-             (SELECT json_group_array(json_object('name', a.authorName, 'isCorresponding', a.isCorresponding))
+             (SELECT json_group_array(json_object('name', a.authorName, 'isCorresponding', a.isCorresponding, 'isNuAffiliated', a.isNuAffiliated))
               FROM irPublicationAuthor a WHERE a.publicationId = p.id) as authors
       FROM irPublication p 
       ORDER BY p.createdAt DESC
@@ -97,9 +97,9 @@ app.post('/api/publications/import', async (c) => {
     for (const auth of authorsWithUserId) {
       const authId = crypto.randomUUID()
       await c.env.DB.prepare(`
-        INSERT INTO irPublicationAuthor (id, publicationId, authorName, userId, authorOrder, isCorresponding)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).bind(authId, pubId, auth.name, auth.userId, auth.order, auth.isCorresponding ? 1 : 0).run()
+        INSERT INTO irPublicationAuthor (id, publicationId, authorName, userId, authorOrder, isCorresponding, isNuAffiliated)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(authId, pubId, auth.name, auth.userId, auth.order, auth.isCorresponding ? 1 : 0, auth.isNuAffiliated ?? 1).run()
     }
 
     return c.json({ status: 'inserted', id: pubId, claimingAuthorId })
@@ -116,6 +116,8 @@ app.get('/api/researchers', async (c) => {
       SELECT 
         u.id, 
         u.name, 
+        u.joinDate,
+        u.resignDate,
         COALESCE(p.department, 'Faculty of Medicine') as department,
         COALESCE(p.status, 'Active') as status,
         p.orcid,
@@ -142,8 +144,22 @@ app.put('/api/researchers/:id', async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
-    const { orcid } = body;
+    const { orcid, joinDate, resignDate } = body;
     
+    if (joinDate !== undefined || resignDate !== undefined) {
+      const updates = [];
+      const bindings = [];
+      if (joinDate !== undefined) { updates.push('joinDate = ?'); bindings.push(joinDate); }
+      if (resignDate !== undefined) { updates.push('resignDate = ?'); bindings.push(resignDate); }
+      bindings.push(id);
+      
+      await c.env.DB.prepare(`
+        UPDATE irUser 
+        SET ${updates.join(', ')}
+        WHERE id = ?
+      `).bind(...bindings).run();
+    }
+
     if (orcid !== undefined) {
       // Find the researcher profile by id (which maps to u.id in the GET request, but let's check if the ID passed is user id or profile id)
       // In the GET request: SELECT u.id ... FROM irUser u LEFT JOIN irResearcherProfile p ON u.id = p.userId
@@ -219,10 +235,24 @@ app.get('/api/conferences', async (c) => {
 app.post('/api/analytics/view', async (c) => {
   try {
     const body = await c.req.json();
-    const { domain, path, sessionId, userAgent } = body;
+    const { domain, path, sessionId, userAgent, resolution, language, referrer, deviceType: clientDeviceType } = body;
     
     if (!domain || !path || !sessionId) {
       return c.json({ error: 'Missing required fields' }, 400);
+    }
+    
+    const ipAddress = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
+    const country = c.req.header('cf-ipcountry') || 'unknown';
+
+    // Parse device type if not provided explicitly by frontend
+    let deviceType = clientDeviceType || 'Desktop';
+    if (!clientDeviceType && userAgent) {
+        const ua = userAgent.toLowerCase();
+        if (/(tablet|ipad|playbook|silk)|(android(?!.*mobi))/i.test(ua)) {
+            deviceType = 'Tablet';
+        } else if (/Mobile|iP(hone|od)|Android|BlackBerry|IEMobile|Kindle|Silk-Accelerated|(hpw|web)OS|Opera M(obi|ini)/.test(ua)) {
+            deviceType = 'Mobile';
+        }
     }
 
     // Check if same session visited same path in last 30 minutes
@@ -238,9 +268,21 @@ app.post('/api/analytics/view', async (c) => {
 
     const viewId = crypto.randomUUID();
     await c.env.DB.prepare(`
-      INSERT INTO irPageViews (id, domain, path, sessionId, userAgent)
-      VALUES (?, ?, ?, ?, ?)
-    `).bind(viewId, domain, path, sessionId, userAgent || null).run();
+      INSERT INTO irPageViews (id, domain, path, sessionId, userAgent, ipAddress, country, deviceType, resolution, language, referrer)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      viewId, 
+      domain, 
+      path, 
+      sessionId, 
+      userAgent || null,
+      ipAddress,
+      country,
+      deviceType,
+      resolution || null,
+      language || null,
+      referrer || null
+    ).run();
 
     return c.json({ status: 'recorded', id: viewId });
   } catch (e: any) {
