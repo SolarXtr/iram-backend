@@ -13,6 +13,55 @@ app.get('/', (c) => {
   return c.text('iRAM Backend API is running on Cloudflare Workers!')
 })
 
+// === REFERENCE DATABASE ENDPOINTS ===
+
+app.get('/api/reference/quartile/:issn', async (c) => {
+  try {
+    const issn = c.req.param('issn');
+    const record = await c.env.DB.prepare(`
+      SELECT issn, source, quartile, year
+      FROM irJournalQuartile
+      WHERE issn = ?
+      ORDER BY year DESC
+      LIMIT 1
+    `).bind(issn).first();
+
+    if (!record) {
+      return c.json({ error: 'Not found' }, 404);
+    }
+
+    return c.json(record);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+app.post('/api/reference/journals', async (c) => {
+  try {
+    const body = await c.req.json();
+    if (!Array.isArray(body)) {
+      return c.json({ error: 'Body must be an array' }, 400);
+    }
+
+    let count = 0;
+    for (const j of body) {
+      const { issn, source, quartile, year } = j;
+      if (!issn || !source) continue;
+
+      const id = `${issn}-${source}`;
+      await c.env.DB.prepare(`
+        INSERT OR REPLACE INTO irJournalQuartile (id, issn, source, quartile, year, updatedAt)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+      `).bind(id, issn, source, quartile || null, year || null).run();
+      count++;
+    }
+
+    return c.json({ status: 'inserted', count });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 // === PUBLICATIONS ENDPOINTS ===
 
 app.get('/api/publications', async (c) => {
@@ -33,7 +82,7 @@ app.get('/api/publications', async (c) => {
 app.post('/api/publications/import', async (c) => {
   try {
     const body = await c.req.json()
-    const { doi, title, journal, year, coverDate, citations, quartile, status, authors, databases } = body
+    const { doi, title, journal, year, coverDate, citations, quartile, quartile_scimago, status, authors, databases } = body
     const sourceDbStr = databases ? JSON.stringify(databases) : '["Scopus"]'
 
     // 1. Duplicate Check
@@ -51,7 +100,7 @@ app.post('/api/publications/import', async (c) => {
       const mergedDbStr = JSON.stringify(mergedDbs)
 
       // Update year, coverDate, citations, and sourceDatabases for existing publication
-      await c.env.DB.prepare('UPDATE irPublication SET year = COALESCE(?, year), coverDate = COALESCE(?, coverDate), citations = COALESCE(?, citations), sourceDatabases = ? WHERE id = ?').bind(year || null, coverDate || null, citations ?? null, mergedDbStr, existing.id).run()
+      await c.env.DB.prepare('UPDATE irPublication SET year = COALESCE(?, year), coverDate = COALESCE(?, coverDate), citations = COALESCE(?, citations), quartile_scimago = COALESCE(?, quartile_scimago), sourceDatabases = ? WHERE id = ?').bind(year || null, coverDate || null, citations ?? null, quartile_scimago || null, mergedDbStr, existing.id).run()
       
       return c.json({ status: 'skipped', id: existing.id, message: 'Publication already exists, updated year/coverDate/citations/databases if provided' })
     }
@@ -89,9 +138,9 @@ app.post('/api/publications/import', async (c) => {
     // 3. Insert into irPublication
     const pubId = crypto.randomUUID()
     await c.env.DB.prepare(`
-      INSERT INTO irPublication (id, doi, title, journal, year, coverDate, citations, quartile, uniRewardStatus, uniRewardAmount, facultyRewardStatus, facultyRewardAmount, status, projectId, claimingAuthorId, sourceDatabases)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 'PENDING', 0, ?, NULL, ?, ?)
-    `).bind(pubId, doi || null, title, journal || '', year || null, coverDate || null, citations ?? 0, quartile || '', status || 'PUBLISHED', claimingAuthorId, sourceDbStr).run()
+      INSERT INTO irPublication (id, doi, title, journal, year, coverDate, citations, quartile, quartile_scimago, uniRewardStatus, uniRewardAmount, facultyRewardStatus, facultyRewardAmount, status, projectId, claimingAuthorId, sourceDatabases)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, 'PENDING', 0, ?, NULL, ?, ?)
+    `).bind(pubId, doi || null, title, journal || '', year || null, coverDate || null, citations ?? 0, quartile || '', quartile_scimago || 'N/A', status || 'PUBLISHED', claimingAuthorId, sourceDbStr).run()
 
     // 4. Insert into irPublicationAuthor
     for (const auth of authorsWithUserId) {
