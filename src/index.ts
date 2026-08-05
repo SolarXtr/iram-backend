@@ -161,14 +161,26 @@ app.put('/api/publications/:id', async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
-    const { quartile } = body;
+    const { title, journal, year, citations, doi, quartile, quartile_scimago } = body;
 
-    if (quartile !== undefined) {
+    const fields = [];
+    const bindings = [];
+
+    if (title !== undefined) { fields.push('title = ?'); bindings.push(title); }
+    if (journal !== undefined) { fields.push('journal = ?'); bindings.push(journal); }
+    if (year !== undefined) { fields.push('year = ?'); bindings.push(parseInt(year) || null); }
+    if (citations !== undefined) { fields.push('citations = ?'); bindings.push(parseInt(citations) || 0); }
+    if (doi !== undefined) { fields.push('doi = ?'); bindings.push(doi || null); }
+    if (quartile !== undefined) { fields.push('quartile = ?'); bindings.push(quartile || 'N/A'); }
+    if (quartile_scimago !== undefined) { fields.push('quartile_scimago = ?'); bindings.push(quartile_scimago || 'N/A'); }
+
+    if (fields.length > 0) {
+      bindings.push(id);
       await c.env.DB.prepare(`
         UPDATE irPublication 
-        SET quartile = ? 
+        SET ${fields.join(', ')} 
         WHERE id = ?
-      `).bind(quartile, id).run();
+      `).bind(...bindings).run();
     }
     
     return c.json({ status: 'updated', id });
@@ -206,8 +218,34 @@ app.get('/api/researchers', async (c) => {
 })
 
 app.post('/api/researchers', async (c) => {
-  // Keeping old researcher sync code intact
-  return c.json({ status: 'deprecated', message: 'Use direct DB imports' })
+  try {
+    const body = await c.req.json();
+    const { name, author_id, orcid, department, joinDate, resignDate, status } = body;
+
+    const userId = crypto.randomUUID();
+    
+    // Split name into first/last name
+    const parts = name.trim().split(/\s+/);
+    const firstName = parts[0] || '';
+    const lastName = parts.slice(1).join(' ') || '';
+    const email = `${firstName.toLowerCase()}.${lastName.toLowerCase().replace(/\s+/g, '') || 'researcher'}@nu.ac.th`;
+
+    // Insert into irUser
+    await c.env.DB.prepare(`
+      INSERT INTO irUser (id, name, email, firstName, lastName, role, joinDate, resignDate)
+      VALUES (?, ?, ?, ?, ?, 'RESEARCHER', ?, ?)
+    `).bind(userId, name, email, firstName, lastName, joinDate || null, resignDate || null).run();
+
+    // Insert into irResearcherProfile
+    await c.env.DB.prepare(`
+      INSERT INTO irResearcherProfile (id, userId, department, status, orcid, scopusAuthorId)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(crypto.randomUUID(), userId, department || 'Faculty of Medicine', status || 'Active', orcid || null, author_id || null).run();
+
+    return c.json({ status: 'inserted', id: userId });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
 })
 
 app.put('/api/researchers/:id', async (c) => {
