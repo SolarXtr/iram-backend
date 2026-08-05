@@ -190,6 +190,7 @@ app.get('/api/researchers', async (c) => {
         COALESCE(p.department, 'Faculty of Medicine') as department,
         COALESCE(p.status, 'Active') as status,
         p.orcid,
+        p.scopusAuthorId as author_id,
         (SELECT COUNT(DISTINCT pa.publicationId) FROM irPublicationAuthor pa WHERE pa.userId = u.id) as publications_count,
         (SELECT COUNT(rp.id) FROM irResearchProject rp WHERE rp.leaderId = u.id) as projects_count
       FROM irUser u
