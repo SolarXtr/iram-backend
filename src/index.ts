@@ -160,7 +160,15 @@ async function processSingleImport(db: any, body: any, userRole: string, activeU
     let authorsWithUserId = [];
 
     for (const auth of authors) {
-      const user = await db.prepare('SELECT id FROM irUser WHERE name LIKE ? COLLATE NOCASE').bind(`%${auth.name}%`).first()
+      const cleanAuthName = (auth.name || '').trim();
+      const user = await db.prepare(`
+        SELECT id FROM irUser 
+        WHERE shortNameEn = ? COLLATE NOCASE 
+           OR name = ? COLLATE NOCASE
+           OR name LIKE ? COLLATE NOCASE
+           OR aliasesJson LIKE ?
+        LIMIT 1
+      `).bind(cleanAuthName, cleanAuthName, `%${cleanAuthName}%`, `%"${cleanAuthName}"%`).first();
       authorsWithUserId.push({
         ...auth,
         userId: user ? (user as any).id : null
@@ -1034,6 +1042,14 @@ app.get('/api/users', async (c) => {
         u.title, 
         u.firstName, 
         u.lastName, 
+        u.titleTh,
+        u.firstNameTh,
+        u.lastNameTh,
+        u.titleEn,
+        u.firstNameEn,
+        u.lastNameEn,
+        u.shortNameEn,
+        u.aliasesJson,
         u.employeeId, 
         u.phone, 
         u.bankName, 
@@ -1044,7 +1060,9 @@ app.get('/api/users', async (c) => {
         u.rolesJson, 
         u.lastLoginAt, 
         u.isDeleted,
-        COALESCE(p.department, 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร') as department,
+        COALESCE(u.department, p.department, 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร') as department,
+        COALESCE(u.scopusAuthorId, p.scopusAuthorId) as scopusAuthorId,
+        COALESCE(u.orcid, p.orcid) as orcid,
         COALESCE(p.status, 'active') as status
       FROM irUser u
       LEFT JOIN irResearcherProfile p ON u.id = p.userId
@@ -1066,9 +1084,19 @@ app.get('/api/users', async (c) => {
       return {
         id: row.id,
         name: row.name,
-        academicPosition: row.academicPosition || row.title || 'อาจารย์ / นักวิจัย',
+        titleTh: row.titleTh || undefined,
+        firstNameTh: row.firstNameTh || undefined,
+        lastNameTh: row.lastNameTh || undefined,
+        titleEn: row.titleEn || undefined,
+        firstNameEn: row.firstNameEn || undefined,
+        lastNameEn: row.lastNameEn || undefined,
+        shortNameEn: row.shortNameEn || undefined,
+        aliases: row.aliasesJson ? JSON.parse(row.aliasesJson) : [],
+        academicPosition: row.academicPosition || row.titleTh || row.title || 'อาจารย์ / นักวิจัย',
         administrativePosition: row.administrativePosition || '',
         department: row.department || 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร',
+        scopusAuthorId: row.scopusAuthorId || undefined,
+        orcid: row.orcid || undefined,
         phone: row.phone || '',
         email: row.email,
         bankName: row.bankName || 'ธนาคารกรุงศรีอยุธยา สาขามหาวิทยาลัยนเรศวร',
@@ -1101,6 +1129,14 @@ app.get('/api/users/profile/:email', async (c) => {
         u.email, 
         u.role, 
         u.title, 
+        u.titleTh,
+        u.firstNameTh,
+        u.lastNameTh,
+        u.titleEn,
+        u.firstNameEn,
+        u.lastNameEn,
+        u.shortNameEn,
+        u.aliasesJson,
         u.phone, 
         u.bankName, 
         u.bankAccountNo, 
@@ -1109,7 +1145,9 @@ app.get('/api/users/profile/:email', async (c) => {
         u.administrativePosition, 
         u.rolesJson, 
         u.lastLoginAt, 
-        COALESCE(p.department, 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร') as department,
+        COALESCE(u.department, p.department, 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร') as department,
+        COALESCE(u.scopusAuthorId, p.scopusAuthorId) as scopusAuthorId,
+        COALESCE(u.orcid, p.orcid) as orcid,
         COALESCE(p.status, 'active') as status
       FROM irUser u
       LEFT JOIN irResearcherProfile p ON u.id = p.userId
@@ -1127,9 +1165,19 @@ app.get('/api/users/profile/:email', async (c) => {
     return c.json({
       id: row.id,
       name: row.name,
-      academicPosition: row.academicPosition || row.title || 'อาจารย์ / นักวิจัย',
+      titleTh: row.titleTh || undefined,
+      firstNameTh: row.firstNameTh || undefined,
+      lastNameTh: row.lastNameTh || undefined,
+      titleEn: row.titleEn || undefined,
+      firstNameEn: row.firstNameEn || undefined,
+      lastNameEn: row.lastNameEn || undefined,
+      shortNameEn: row.shortNameEn || undefined,
+      aliases: row.aliasesJson ? JSON.parse(row.aliasesJson) : [],
+      academicPosition: row.academicPosition || row.titleTh || row.title || 'อาจารย์ / นักวิจัย',
       administrativePosition: row.administrativePosition || '',
       department: row.department || 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร',
+      scopusAuthorId: row.scopusAuthorId || undefined,
+      orcid: row.orcid || undefined,
       phone: row.phone || '',
       email: row.email,
       bankName: row.bankName || 'ธนาคารกรุงศรีอยุธยา สาขามหาวิทยาลัยนเรศวร',
@@ -1164,7 +1212,16 @@ app.post('/api/users', async (c) => {
       role = 'researcher',
       roles = ['researcher'],
       status = 'active',
-      lastLoginAt = new Date().toISOString()
+      lastLoginAt = new Date().toISOString(),
+      titleTh,
+      firstNameTh,
+      lastNameTh,
+      titleEn,
+      firstNameEn,
+      lastNameEn,
+      shortNameEn,
+      scopusAuthorId,
+      orcid
     } = body;
 
     if (!email) {
@@ -1176,15 +1233,30 @@ app.post('/api/users', async (c) => {
     const rolesJson = JSON.stringify(roles || [cleanRole]);
 
     // Check existing
-    const existing: any = await c.env.DB.prepare('SELECT id FROM irUser WHERE LOWER(email) = ?').bind(cleanEmail).first();
+    const existing: any = await c.env.DB.prepare('SELECT * FROM irUser WHERE LOWER(email) = ?').bind(cleanEmail).first();
     const userId = existing ? existing.id : id;
+
+    let computedShortName = shortNameEn;
+    if (!computedShortName && lastNameEn && firstNameEn) {
+      computedShortName = `${lastNameEn.trim()} ${firstNameEn.trim()[0].toUpperCase()}.`;
+    }
 
     if (existing) {
       await c.env.DB.prepare(`
         UPDATE irUser SET
           name = COALESCE(?, name),
+          titleTh = COALESCE(?, titleTh),
+          firstNameTh = COALESCE(?, firstNameTh),
+          lastNameTh = COALESCE(?, lastNameTh),
+          titleEn = COALESCE(?, titleEn),
+          firstNameEn = COALESCE(?, firstNameEn),
+          lastNameEn = COALESCE(?, lastNameEn),
+          shortNameEn = COALESCE(?, shortNameEn),
           academicPosition = ?,
           administrativePosition = ?,
+          department = COALESCE(?, department),
+          scopusAuthorId = COALESCE(?, scopusAuthorId),
+          orcid = COALESCE(?, orcid),
           phone = ?,
           bankName = ?,
           bankAccountNo = ?,
@@ -1195,8 +1267,18 @@ app.post('/api/users', async (c) => {
         WHERE id = ?
       `).bind(
         name ?? null,
+        titleTh ?? null,
+        firstNameTh ?? null,
+        lastNameTh ?? null,
+        titleEn ?? null,
+        firstNameEn ?? null,
+        lastNameEn ?? null,
+        computedShortName ?? null,
         academicPosition,
         administrativePosition,
+        department,
+        scopusAuthorId ?? null,
+        orcid ?? null,
         phone,
         bankName,
         bankAccountNo,
@@ -1210,10 +1292,14 @@ app.post('/api/users', async (c) => {
       await c.env.DB.prepare(`
         INSERT INTO irUser (
           id, name, email, role, academicPosition, administrativePosition, phone,
-          bankName, bankAccountNo, idCardNo, rolesJson, lastLoginAt, isDeleted
+          bankName, bankAccountNo, idCardNo, rolesJson, lastLoginAt, isDeleted,
+          titleTh, firstNameTh, lastNameTh, titleEn, firstNameEn, lastNameEn,
+          shortNameEn, department, scopusAuthorId, orcid
         ) VALUES (
           ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, 0
+          ?, ?, ?, ?, ?, 0,
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?
         )
       `).bind(
         userId,
@@ -1227,18 +1313,18 @@ app.post('/api/users', async (c) => {
         bankAccountNo,
         idCardNo,
         rolesJson,
-        lastLoginAt
+        lastLoginAt,
+        titleTh ?? null,
+        firstNameTh ?? null,
+        lastNameTh ?? null,
+        titleEn ?? null,
+        firstNameEn ?? null,
+        lastNameEn ?? null,
+        computedShortName ?? null,
+        department,
+        scopusAuthorId ?? null,
+        orcid ?? null
       ).run();
-    }
-
-    // Upsert irResearcherProfile
-    const profileRow = await c.env.DB.prepare('SELECT id FROM irResearcherProfile WHERE userId = ?').bind(userId).first();
-    if (profileRow) {
-      await c.env.DB.prepare('UPDATE irResearcherProfile SET department = ?, status = ? WHERE userId = ?')
-        .bind(department, status, userId).run();
-    } else {
-      await c.env.DB.prepare('INSERT INTO irResearcherProfile (id, userId, department, status) VALUES (?, ?, ?, ?)')
-        .bind(crypto.randomUUID(), userId, department, status).run();
     }
 
     return c.json({ status: 'success', id: userId, email: cleanEmail });
@@ -1247,16 +1333,25 @@ app.post('/api/users', async (c) => {
   }
 });
 
-// 4. Update User Profile by ID
+// 4. Update User Profile by ID (with Progression & Audit History Logging)
 app.put('/api/users/profile/:id', async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
     const {
       name,
+      titleTh,
+      firstNameTh,
+      lastNameTh,
+      titleEn,
+      firstNameEn,
+      lastNameEn,
+      shortNameEn,
       academicPosition,
       administrativePosition,
       department,
+      scopusAuthorId,
+      orcid,
       phone,
       bankName,
       bankAccountNo,
@@ -1264,15 +1359,75 @@ app.put('/api/users/profile/:id', async (c) => {
       role,
       roles,
       status,
-      lastLoginAt
+      lastLoginAt,
+      effectiveDate = new Date().toISOString().split('T')[0],
+      changeReason = 'การปรับปรุงข้อมูลประวัติ/การเลื่อนตำแหน่งทางวิชาการ'
     } = body;
 
-    const updates: string[] = [];
+    // Fetch existing user to detect promotions and changes
+    const existing: any = await c.env.DB.prepare('SELECT * FROM irUser WHERE id = ?').bind(id).first();
+    if (!existing) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+
+    // 1. Audit Log: Academic Position Promotion (ผศ. -> รศ. -> ศ.)
+    if (academicPosition !== undefined && existing.academicPosition && existing.academicPosition !== academicPosition) {
+      const historyId = crypto.randomUUID();
+      await c.env.DB.prepare(`
+        INSERT INTO irResearcherProfileHistory (id, userId, changedField, oldValue, newValue, effectiveDate, reason)
+        VALUES (?, ?, 'academicPosition', ?, ?, ?, ?)
+      `).bind(historyId, id, existing.academicPosition, academicPosition, effectiveDate, changeReason).run();
+    }
+
+    // 2. Audit Log: Title Change
+    if (titleTh !== undefined && existing.titleTh && existing.titleTh !== titleTh) {
+      const historyId = crypto.randomUUID();
+      await c.env.DB.prepare(`
+        INSERT INTO irResearcherProfileHistory (id, userId, changedField, oldValue, newValue, effectiveDate, reason)
+        VALUES (?, ?, 'titleTh', ?, ?, ?, ?)
+      `).bind(historyId, id, existing.titleTh, titleTh, effectiveDate, changeReason).run();
+    }
+
+    // 3. Audit Log: Name/Surname Change & Short Name Alias Preservation
+    let aliases = [];
+    try {
+      if (existing.aliasesJson) aliases = JSON.parse(existing.aliasesJson);
+    } catch (e) {}
+
+    let computedShortName = shortNameEn !== undefined ? shortNameEn : existing.shortNameEn;
+    const finalFirstEn = firstNameEn !== undefined ? firstNameEn : existing.firstNameEn;
+    const finalLastEn = lastNameEn !== undefined ? lastNameEn : existing.lastNameEn;
+    if (finalFirstEn && finalLastEn) {
+      const newCalc = `${finalLastEn.trim()} ${finalFirstEn.trim()[0].toUpperCase()}.`;
+      if (shortNameEn === undefined) {
+        computedShortName = newCalc;
+      }
+    }
+
+    if (existing.shortNameEn && computedShortName && existing.shortNameEn !== computedShortName) {
+      // Archive old shortName into aliasesJson
+      if (!aliases.some((a: any) => a.shortName === existing.shortNameEn)) {
+        aliases.push({ shortName: existing.shortNameEn, type: 'former_name', archivedAt: effectiveDate });
+      }
+    }
+
+    const updates: string[] = ["updatedAt = datetime('now')"];
     const params: any[] = [];
 
     if (name !== undefined) { updates.push('name = ?'); params.push(name); }
+    if (titleTh !== undefined) { updates.push('titleTh = ?'); params.push(titleTh); }
+    if (firstNameTh !== undefined) { updates.push('firstNameTh = ?'); params.push(firstNameTh); }
+    if (lastNameTh !== undefined) { updates.push('lastNameTh = ?'); params.push(lastNameTh); }
+    if (titleEn !== undefined) { updates.push('titleEn = ?'); params.push(titleEn); }
+    if (firstNameEn !== undefined) { updates.push('firstNameEn = ?'); params.push(firstNameEn); }
+    if (lastNameEn !== undefined) { updates.push('lastNameEn = ?'); params.push(lastNameEn); }
+    if (computedShortName !== undefined) { updates.push('shortNameEn = ?'); params.push(computedShortName); }
+    if (aliases.length > 0) { updates.push('aliasesJson = ?'); params.push(JSON.stringify(aliases)); }
     if (academicPosition !== undefined) { updates.push('academicPosition = ?'); params.push(academicPosition); }
     if (administrativePosition !== undefined) { updates.push('administrativePosition = ?'); params.push(administrativePosition); }
+    if (department !== undefined) { updates.push('department = ?'); params.push(department); }
+    if (scopusAuthorId !== undefined) { updates.push('scopusAuthorId = ?'); params.push(scopusAuthorId); }
+    if (orcid !== undefined) { updates.push('orcid = ?'); params.push(orcid); }
     if (phone !== undefined) { updates.push('phone = ?'); params.push(phone); }
     if (bankName !== undefined) { updates.push('bankName = ?'); params.push(bankName); }
     if (bankAccountNo !== undefined) { updates.push('bankAccountNo = ?'); params.push(bankAccountNo); }
@@ -1281,21 +1436,175 @@ app.put('/api/users/profile/:id', async (c) => {
     if (roles !== undefined) { updates.push('rolesJson = ?'); params.push(JSON.stringify(roles)); }
     if (lastLoginAt !== undefined) { updates.push('lastLoginAt = ?'); params.push(lastLoginAt); }
 
-    if (updates.length > 0) {
-      params.push(id);
-      await c.env.DB.prepare(`UPDATE irUser SET ${updates.join(', ')} WHERE id = ?`).bind(...params).run();
+    params.push(id);
+    await c.env.DB.prepare(`UPDATE irUser SET ${updates.join(', ')} WHERE id = ?`).bind(...params).run();
+
+    return c.json({ status: 'updated', id, shortNameEn: computedShortName });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// 5. Admin: Consolidate Researcher Profiles into irUser (Zero CLI Timeout)
+app.post('/api/admin/consolidate-users', async (c) => {
+  try {
+    const { results: users } = await c.env.DB.prepare(`
+      SELECT u.id, u.name, u.email, u.title, u.firstName, u.lastName, u.academicPosition,
+             p.nameTh, p.titleTh, p.firstNameTh, p.lastNameTh, p.titleEn, p.firstNameEn, p.lastNameEn,
+             p.shortNameEn, p.department, p.scopusAuthorId, p.orcid, p.wosResearcherId
+      FROM irUser u
+      LEFT JOIN irResearcherProfile p ON u.id = p.userId
+    `).all();
+
+    const THAI_TITLES = [
+      'ศ.ดร.นพ.', 'ศ.ดร.พญ.', 'ศ.ดร.', 'ศ.นพ.', 'ศ.พญ.', 'ศ.',
+      'รศ.ดร.นพ.', 'รศ.ดร.พญ.', 'รศ.ดร.', 'รศ.นพ.', 'รศ.พญ.', 'รศ.',
+      'ผศ.ดร.นพ.', 'ผศ.ดร.พญ.', 'ผศ.ดร.', 'ผศ.นพ.', 'ผศ.พญ.', 'ผศ.',
+      'อ.ดร.นพ.', 'อ.ดร.', 'อ.นพ.', 'อ.พญ.', 'อาจารย์ แพทย์หญิง', 'อาจารย์ นายแพทย์', 'อาจารย์',
+      'ผู้ช่วยศาสตราจารย์ แพทย์หญิง', 'ผู้ช่วยศาสตราจารย์ นายแพทย์', 'ผู้ช่วยศาสตราจารย์ ดร.', 'ผู้ช่วยศาสตราจารย์',
+      'รองศาสตราจารย์ แพทย์หญิง', 'รองศาสตราจารย์ นายแพทย์', 'รองศาสตราจารย์ ดร.', 'รองศาสตราจารย์',
+      'ศาสตราจารย์ แพทย์หญิง', 'ศาสตราจารย์ นายแพทย์', 'ศาสตราจารย์ ดร.', 'ศาสตราจารย์',
+      'นายแพทย์', 'แพทย์หญิง', 'นพ.', 'พญ.', 'ดร.', 'นาย', 'นางสาว', 'นาง'
+    ];
+
+    const ENG_TITLES = [
+      'Assoc. Prof. Dr.', 'Asst. Prof. Dr.', 'Prof. Dr.', 'Assoc. Prof.', 'Asst. Prof.', 'Prof.',
+      'Dr.', 'MD', 'Ph.D.', 'Mr.', 'Mrs.', 'Miss', 'Ms.'
+    ];
+
+    const isThai = (t: string) => /[\u0E00-\u0E7F]/.test(t || '');
+    const clean = (s: any) => (s || '').toString().trim();
+
+    const statements = [];
+    const samples = [];
+
+    for (const row of (users || [])) {
+      let {
+        id, name, title, academicPosition,
+        nameTh, titleTh, firstNameTh, lastNameTh,
+        titleEn, firstNameEn, lastNameEn, shortNameEn,
+        department, scopusAuthorId, orcid, wosResearcherId
+      } = row as any;
+
+      // 1. Thai
+      let finalTitleTh = clean(titleTh);
+      let finalFirstNameTh = clean(firstNameTh);
+      let finalLastNameTh = clean(lastNameTh);
+
+      let rawTh = clean(nameTh);
+      if (!rawTh && isThai(name)) rawTh = clean(name);
+
+      if (rawTh) {
+        for (const t of THAI_TITLES) {
+          if (rawTh.startsWith(t)) {
+            if (!finalTitleTh) finalTitleTh = t;
+            rawTh = rawTh.slice(t.length).trim();
+            break;
+          }
+        }
+        const parts = rawTh.split(/\s+/).filter(Boolean);
+        if (!finalFirstNameTh && parts.length > 0) finalFirstNameTh = parts[0];
+        if (!finalLastNameTh && parts.length > 1) finalLastNameTh = parts.slice(1).join(' ');
+      }
+
+      // 2. English
+      let finalTitleEn = clean(titleEn);
+      let finalFirstNameEn = clean(firstNameEn);
+      let finalLastNameEn = clean(lastNameEn);
+
+      let rawEn = clean(name);
+      if (!isThai(rawEn)) {
+        for (const t of ENG_TITLES) {
+          if (rawEn.startsWith(t)) {
+            if (!finalTitleEn) finalTitleEn = t;
+            rawEn = rawEn.slice(t.length).trim();
+            break;
+          }
+        }
+        const parts = rawEn.split(/\s+/).filter(Boolean);
+        if (!finalFirstNameEn && parts.length > 0) finalFirstNameEn = parts[0];
+        if (!finalLastNameEn && parts.length > 1) finalLastNameEn = parts.slice(1).join(' ');
+      }
+
+      // 3. Fallback titleTh
+      if (!finalTitleTh) {
+        if (academicPosition) {
+          if (academicPosition.includes('ศาสตราจารย์')) finalTitleTh = 'ศ.';
+          else if (academicPosition.includes('รองศาสตราจารย์')) finalTitleTh = 'รศ.';
+          else if (academicPosition.includes('ผู้ช่วยศาสตราจารย์')) finalTitleTh = 'ผศ.';
+          else if (academicPosition.includes('อาจารย์')) finalTitleTh = 'อ.';
+        } else if (title) {
+          finalTitleTh = title;
+        }
+      }
+
+      // 4. shortNameEn: [LastName] [FirstInitial].
+      let finalShortNameEn = clean(shortNameEn);
+      if (!finalShortNameEn && finalLastNameEn && finalFirstNameEn) {
+        finalShortNameEn = `${finalLastNameEn} ${finalFirstNameEn[0].toUpperCase()}.`;
+      }
+
+      const finalDept = clean(department) || 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร';
+      const finalScopus = clean(scopusAuthorId) || null;
+      const finalOrcid = clean(orcid) || null;
+      const finalWos = clean(wosResearcherId) || null;
+
+      const aliases = finalShortNameEn ? [{ shortName: finalShortNameEn, type: 'primary' }] : [];
+
+      statements.push(c.env.DB.prepare(`
+        UPDATE irUser SET
+          titleTh = ?,
+          firstNameTh = ?,
+          lastNameTh = ?,
+          titleEn = ?,
+          firstNameEn = ?,
+          lastNameEn = ?,
+          shortNameEn = ?,
+          department = ?,
+          scopusAuthorId = ?,
+          orcid = ?,
+          wosResearcherId = ?,
+          aliasesJson = ?
+        WHERE id = ?
+      `).bind(
+        finalTitleTh || null,
+        finalFirstNameTh || null,
+        finalLastNameTh || null,
+        finalTitleEn || null,
+        finalFirstNameEn || null,
+        finalLastNameEn || null,
+        finalShortNameEn || null,
+        finalDept,
+        finalScopus,
+        finalOrcid,
+        finalWos,
+        JSON.stringify(aliases),
+        id
+      ));
+
+      if (samples.length < 5 && finalShortNameEn) {
+        samples.push({
+          id,
+          nameTh: `${finalTitleTh || ''} ${finalFirstNameTh || ''} ${finalLastNameTh || ''}`.trim(),
+          nameEn: `${finalFirstNameEn || ''} ${finalLastNameEn || ''}`.trim(),
+          shortNameEn: finalShortNameEn,
+          department: finalDept
+        });
+      }
     }
 
-    if (department !== undefined || status !== undefined) {
-      const profUpdates = [];
-      const profParams = [];
-      if (department !== undefined) { profUpdates.push('department = ?'); profParams.push(department); }
-      if (status !== undefined) { profUpdates.push('status = ?'); profParams.push(status); }
-      profParams.push(id);
-      await c.env.DB.prepare(`UPDATE irResearcherProfile SET ${profUpdates.join(', ')} WHERE userId = ?`).bind(...profParams).run();
+    // Execute in chunks of 50 in Cloudflare D1
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < statements.length; i += CHUNK_SIZE) {
+      const chunk = statements.slice(i, i + CHUNK_SIZE);
+      await c.env.DB.batch(chunk);
     }
 
-    return c.json({ status: 'updated', id });
+    return c.json({
+      status: 'success',
+      totalConsolidated: statements.length,
+      samples
+    });
   } catch (e: any) {
     return c.json({ error: e.message }, 500);
   }
