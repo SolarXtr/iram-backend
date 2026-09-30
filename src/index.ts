@@ -383,14 +383,16 @@ app.get('/api/researchers', async (c) => {
     const { results: researchers } = await c.env.DB.prepare(`
       SELECT 
         u.id, 
-        u.name, 
+        u.name,
+        u.shortNameEn,
+        u.aliasesJson,
         u.joinDate,
         u.resignDate,
-        COALESCE(p.department, 'Faculty of Medicine') as department,
+        COALESCE(u.department, p.department, 'Faculty of Medicine') as department,
         COALESCE(p.status, 'Active') as status,
-        p.orcid,
-        p.scopusAuthorId as author_id,
-        p.wosResearcherId,
+        COALESCE(u.orcid, p.orcid) as orcid,
+        COALESCE(u.scopusAuthorId, p.scopusAuthorId) as author_id,
+        COALESCE(u.wosResearcherId, p.wosResearcherId) as wosResearcherId,
         (SELECT COUNT(DISTINCT pa.publicationId) FROM irPublicationAuthor pa WHERE pa.userId = u.id) as publications_count,
         (SELECT COUNT(rp.id) FROM irResearchProject rp WHERE rp.leaderId = u.id) as projects_count
       FROM irUser u
@@ -501,34 +503,89 @@ app.put('/api/researchers/:id', async (c) => {
     }
 
     const body = await c.req.json();
-    const { orcid, joinDate, resignDate } = body;
+    const { name, author_id, orcid, department, joinDate, resignDate, status } = body;
     
-    if (joinDate !== undefined || resignDate !== undefined) {
-      const updates = [];
-      const bindings = [];
-      if (joinDate !== undefined) { updates.push('joinDate = ?'); bindings.push(joinDate); }
-      if (resignDate !== undefined) { updates.push('resignDate = ?'); bindings.push(resignDate); }
-      bindings.push(id);
-      
+    // --- Update irUser fields ---
+    const userUpdates: string[] = [];
+    const userBindings: any[] = [];
+
+    if (name !== undefined) { userUpdates.push('name = ?'); userBindings.push(name); }
+    if (joinDate !== undefined) { userUpdates.push('joinDate = ?'); userBindings.push(joinDate || null); }
+    if (resignDate !== undefined) { userUpdates.push('resignDate = ?'); userBindings.push(resignDate || null); }
+    if (department !== undefined) { userUpdates.push('department = ?'); userBindings.push(department || null); }
+    if (orcid !== undefined) { userUpdates.push('orcid = ?'); userBindings.push(orcid || null); }
+    if (author_id !== undefined) { userUpdates.push('scopusAuthorId = ?'); userBindings.push(author_id || null); }
+
+    if (userUpdates.length > 0) {
+      userBindings.push(id);
       await c.env.DB.prepare(`
         UPDATE irUser 
-        SET ${updates.join(', ')}
+        SET ${userUpdates.join(', ')}
         WHERE id = ?
-      `).bind(...bindings).run();
+      `).bind(...userBindings).run();
     }
 
-    if (orcid !== undefined) {
-      // Find the researcher profile by id (which maps to u.id in the GET request, but let's check if the ID passed is user id or profile id)
-      // In the GET request: SELECT u.id ... FROM irUser u LEFT JOIN irResearcherProfile p ON u.id = p.userId
-      // So the id being passed is irUser.id. We need to update irResearcherProfile where userId = id
+    // --- Update irResearcherProfile fields (for backwards compatibility) ---
+    const profileUpdates: string[] = [];
+    const profileBindings: any[] = [];
+
+    if (orcid !== undefined) { profileUpdates.push('orcid = ?'); profileBindings.push(orcid || null); }
+    if (author_id !== undefined) { profileUpdates.push('scopusAuthorId = ?'); profileBindings.push(author_id || null); }
+    if (department !== undefined) { profileUpdates.push('department = ?'); profileBindings.push(department || null); }
+    if (status !== undefined) { profileUpdates.push('status = ?'); profileBindings.push(status || 'Active'); }
+
+    if (profileUpdates.length > 0) {
+      profileBindings.push(id);
       await c.env.DB.prepare(`
         UPDATE irResearcherProfile 
-        SET orcid = ? 
+        SET ${profileUpdates.join(', ')}
         WHERE userId = ?
-      `).bind(orcid, id).run();
+      `).bind(...profileBindings).run();
     }
     
     return c.json({ status: 'updated', id });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+})
+
+// === DELETE ENDPOINTS ===
+
+app.delete('/api/publications/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const userRole = c.req.header('X-User-Role') || 'USER';
+
+    if (userRole !== 'ADMIN') {
+      return c.json({ error: 'Unauthorized: Admin access required' }, 403);
+    }
+
+    // Soft delete: mark as deleted without removing from DB to preserve referential integrity
+    await c.env.DB.prepare(`
+      UPDATE irPublication SET isDeleted = 1 WHERE id = ?
+    `).bind(id).run();
+
+    return c.json({ status: 'deleted', id });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+})
+
+app.delete('/api/researchers/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const userRole = c.req.header('X-User-Role') || 'USER';
+
+    if (userRole !== 'ADMIN') {
+      return c.json({ error: 'Unauthorized: Admin access required' }, 403);
+    }
+
+    // Soft delete: mark user as deleted without removing from DB
+    await c.env.DB.prepare(`
+      UPDATE irUser SET isDeleted = 1 WHERE id = ?
+    `).bind(id).run();
+
+    return c.json({ status: 'deleted', id });
   } catch (e: any) {
     return c.json({ error: e.message }, 500);
   }
