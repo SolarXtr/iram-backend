@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 
 type Bindings = {
   DB: D1Database
+  LINE_CHANNEL_ACCESS_TOKEN?: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -1396,6 +1397,7 @@ app.put('/api/users/profile/:id', async (c) => {
     const id = c.req.param('id');
     const body = await c.req.json();
     const {
+      email,
       name,
       titleTh,
       firstNameTh,
@@ -1471,6 +1473,15 @@ app.put('/api/users/profile/:id', async (c) => {
     const updates: string[] = ["updatedAt = datetime('now')"];
     const params: any[] = [];
 
+    if (email !== undefined && typeof email === 'string' && email.trim()) {
+      const cleanEmail = email.trim().toLowerCase();
+      const emailConflict: any = await c.env.DB.prepare('SELECT id FROM irUser WHERE LOWER(email) = ? AND id != ?').bind(cleanEmail, id).first();
+      if (emailConflict) {
+        return c.json({ error: `อีเมล ${cleanEmail} ถูกใช้งานโดยบัญชีอื่นแล้ว` }, 409);
+      }
+      updates.push('email = ?');
+      params.push(cleanEmail);
+    }
     if (name !== undefined) { updates.push('name = ?'); params.push(name); }
     if (titleTh !== undefined) { updates.push('titleTh = ?'); params.push(titleTh); }
     if (firstNameTh !== undefined) { updates.push('firstNameTh = ?'); params.push(firstNameTh); }
@@ -1491,6 +1502,7 @@ app.put('/api/users/profile/:id', async (c) => {
     if (idCardNo !== undefined) { updates.push('idCardNo = ?'); params.push(idCardNo); }
     if (role !== undefined) { updates.push('role = ?'); params.push(normalizeRole(role)); }
     if (roles !== undefined) { updates.push('rolesJson = ?'); params.push(JSON.stringify(roles)); }
+    if (status !== undefined) { updates.push('status = ?'); params.push(status); }
     if (lastLoginAt !== undefined) { updates.push('lastLoginAt = ?'); params.push(lastLoginAt); }
 
     params.push(id);
@@ -1662,6 +1674,704 @@ app.post('/api/admin/consolidate-users', async (c) => {
       totalConsolidated: statements.length,
       samples
     });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// ==========================================
+// === LINE OA MESSAGING & WEBHOOK SYSTEM ===
+// ==========================================
+
+async function sendLineReply(replyToken: string, messages: any[], token?: string) {
+  if (!token) {
+    console.warn('[LINE Reply] Warning: LINE_CHANNEL_ACCESS_TOKEN is not configured.');
+    return false;
+  }
+  try {
+    const res = await fetch('https://api.line.me/v2/bot/message/reply', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ replyToken, messages })
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('[LINE Reply Failed]', res.status, errText);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[LINE Reply Error]', err);
+    return false;
+  }
+}
+
+async function sendLinePush(to: string, messages: any[], token?: string) {
+  if (!token) {
+    console.warn('[LINE Push] Warning: LINE_CHANNEL_ACCESS_TOKEN is not configured.');
+    return false;
+  }
+  try {
+    const res = await fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ to, messages })
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('[LINE Push Failed]', res.status, errText);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[LINE Push Error]', err);
+    return false;
+  }
+}
+
+function buildLineWelcomeFlex() {
+  return {
+    type: 'flex',
+    altText: 'ยินดีต้อนรับสู่ iRAM-U Services',
+    contents: {
+      type: 'bubble',
+      size: 'mega',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: '#0f172a',
+        paddingAll: '20px',
+        contents: [
+          {
+            type: 'text',
+            text: 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร',
+            color: '#94a3b8',
+            size: 'xs'
+          },
+          {
+            type: 'text',
+            text: 'iRAM-U Services',
+            color: '#ffffff',
+            size: 'xl',
+            weight: 'bold',
+            margin: 'xs'
+          },
+          {
+            type: 'text',
+            text: 'ระบบบริการและแจ้งเตือนเงินรางวัลวิจัย',
+            color: '#38bdf8',
+            size: 'xs',
+            margin: 'xs'
+          }
+        ]
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        paddingAll: '20px',
+        spacing: 'md',
+        contents: [
+          {
+            type: 'text',
+            text: '👋 ยินดีต้อนรับอาจารย์และนักวิจัย',
+            weight: 'bold',
+            size: 'md',
+            color: '#0f172a'
+          },
+          {
+            type: 'text',
+            text: 'เพื่อรับการแจ้งเตือนสถานะคำขอรับเงินรางวัลและค่าตีพิมพ์ผ่าน LINE แบบส่วนตัว (Private Push Notification):',
+            size: 'xs',
+            color: '#475569',
+            wrap: true
+          },
+          {
+            type: 'box',
+            layout: 'vertical',
+            backgroundColor: '#eff6ff',
+            paddingAll: '14px',
+            cornerRadius: '8px',
+            borderColor: '#bfdbfe',
+            borderWidth: '1px',
+            contents: [
+              {
+                type: 'text',
+                text: '👉 ขั้นตอนง่ายๆ เพียงข้อเดียว:',
+                weight: 'bold',
+                size: 'xs',
+                color: '#1e40af'
+              },
+              {
+                type: 'text',
+                text: 'พิมพ์อีเมลมหาวิทยาลัยของท่าน เช่น:\nsomchaij@nu.ac.th\nส่งเข้ามาในห้องแชทนี้ได้ทันทีครับ',
+                size: 'xs',
+                color: '#1d4ed8',
+                margin: 'xs',
+                wrap: true
+              }
+            ]
+          },
+          {
+            type: 'text',
+            text: 'ระบบจะตรวจสอบและผูกบัญชีของท่านทันที ไม่ต้องใช้รหัสผ่านใดๆ',
+            size: 'xxs',
+            color: '#94a3b8',
+            wrap: true
+          }
+        ]
+      }
+    }
+  };
+}
+
+function buildLineLinkedFlex(userName: string, email: string, department: string) {
+  return {
+    type: 'flex',
+    altText: '✅ ผูกบัญชี iRAM-U Services สำเร็จ',
+    contents: {
+      type: 'bubble',
+      size: 'mega',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: '#064e3b',
+        paddingAll: '20px',
+        contents: [
+          {
+            type: 'text',
+            text: 'iRAM-U Services • เชื่อมต่อสำเร็จ',
+            color: '#a7f3d0',
+            size: 'xs',
+            weight: 'bold',
+            letterSpacing: '1px'
+          },
+          {
+            type: 'text',
+            text: 'ผูกบัญชี LINE เรียบร้อย 🎉',
+            color: '#ffffff',
+            size: 'lg',
+            weight: 'bold',
+            margin: 'sm'
+          }
+        ]
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        paddingAll: '20px',
+        spacing: 'md',
+        contents: [
+          {
+            type: 'box',
+            layout: 'horizontal',
+            contents: [
+              { type: 'text', text: '🟢', size: 'xs', flex: 0 },
+              { type: 'text', text: ' เชื่อมต่อข้อมูลมหาวิทยาลัยแล้ว', size: 'xs', color: '#16a34a', weight: 'bold' }
+            ]
+          },
+          { type: 'separator' },
+          {
+            type: 'box',
+            layout: 'vertical',
+            spacing: 'xs',
+            contents: [
+              { type: 'text', text: 'อาจารย์ / นักวิจัย', size: 'xs', color: '#64748b' },
+              { type: 'text', text: userName || email, size: 'sm', weight: 'bold', color: '#1e293b', wrap: true }
+            ]
+          },
+          {
+            type: 'box',
+            layout: 'vertical',
+            spacing: 'xs',
+            contents: [
+              { type: 'text', text: 'อีเมลมหาวิทยาลัย (@nu.ac.th)', size: 'xs', color: '#64748b' },
+              { type: 'text', text: email, size: 'sm', weight: 'bold', color: '#0284c7' }
+            ]
+          },
+          {
+            type: 'box',
+            layout: 'vertical',
+            spacing: 'xs',
+            contents: [
+              { type: 'text', text: 'หน่วยงาน / ภาควิชา', size: 'xs', color: '#64748b' },
+              { type: 'text', text: department || 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร', size: 'xs', color: '#334155', wrap: true }
+            ]
+          },
+          { type: 'separator' },
+          {
+            type: 'box',
+            layout: 'vertical',
+            backgroundColor: '#f8fafc',
+            paddingAll: '12px',
+            cornerRadius: '8px',
+            contents: [
+              {
+                type: 'text',
+                text: '🔔 ระบบพร้อมส่งการแจ้งเตือน 4 ขั้นตอนสำคัญ:',
+                size: 'xs',
+                weight: 'bold',
+                color: '#334155'
+              },
+              {
+                type: 'text',
+                text: '1. เมื่อยื่นคำขอรับรางวัล (Submitted)\n2. ผ่านการตรวจเอกสารและเกณฑ์ (Verified)\n3. คณบดีลงนามอนุมัติเบิกจ่าย (Approved)\n4. งานการเงินโอนเงินเข้าบัญชี (Transferred)',
+                size: 'xxs',
+                color: '#64748b',
+                wrap: true,
+                margin: 'xs'
+              }
+            ]
+          }
+        ]
+      },
+      footer: {
+        type: 'box',
+        layout: 'vertical',
+        contents: [
+          {
+            type: 'text',
+            text: "พิมพ์คำว่า 'สถานะ' ได้ตลอด 24 ชม. เพื่อตรวจสอบความคืบหน้าคำขอของท่าน",
+            size: 'xxs',
+            color: '#94a3b8',
+            align: 'center',
+            wrap: true
+          }
+        ]
+      }
+    }
+  };
+}
+
+function buildLineStatusFlex(email: string, apps: any[]) {
+  if (!apps || apps.length === 0) {
+    return {
+      type: 'text',
+      text: `📋 [iRAM-U Services]\nไม่พบประวัติคำขอรับเงินรางวัลภายใต้อีเมล ${email}\n\nหากท่านเพิ่งยื่นคำขอ โปรดรอระบบประมวลผล หรือตรวจสอบการสะกดอีเมลในระบบอีกครั้งครับ`
+    };
+  }
+
+  const appBoxes = apps.map((app, idx) => {
+    const step = app.currentStep || 1;
+    let stepBadge = `ขั้นตอนที่ ${step}/12`;
+    let badgeColor = '#3b82f6';
+    if (step >= 11) {
+      stepBadge = 'โอนเงินสำเร็จ 🎉';
+      badgeColor = '#16a34a';
+    } else if (step >= 7) {
+      stepBadge = 'คณบดีอนุมัติแล้ว ✨';
+      badgeColor = '#d97706';
+    } else if (step >= 4) {
+      stepBadge = 'เอกสารถูกต้อง 📄';
+      badgeColor = '#6366f1';
+    }
+
+    const title = (app.articleTitle || '').length > 60
+      ? (app.articleTitle || '').substring(0, 57) + '...'
+      : (app.articleTitle || 'ไม่ระบุชื่อบทความ');
+
+    const totalAmt = (app.totalClaimedAmount || 0).toLocaleString('th-TH', { maximumFractionDigits: 0 });
+
+    return {
+      type: 'box',
+      layout: 'vertical',
+      backgroundColor: '#f8fafc',
+      paddingAll: '12px',
+      cornerRadius: '8px',
+      spacing: 'xs',
+      margin: idx > 0 ? 'md' : 'none',
+      contents: [
+        {
+          type: 'box',
+          layout: 'horizontal',
+          contents: [
+            { type: 'text', text: app.trackingNo || 'IRAM', size: 'xs', weight: 'bold', color: '#1e293b' },
+            { type: 'text', text: stepBadge, size: 'xxs', weight: 'bold', color: badgeColor, align: 'end' }
+          ]
+        },
+        {
+          type: 'text',
+          text: title,
+          size: 'xs',
+          color: '#475569',
+          wrap: true
+        },
+        {
+          type: 'text',
+          text: `ยอดเงินขอรับ: ฿${totalAmt}`,
+          size: 'xxs',
+          color: '#0369a1',
+          weight: 'bold'
+        }
+      ]
+    };
+  });
+
+  return {
+    type: 'flex',
+    altText: `📋 ตรวจสอบสถานะคำขอรับรางวัล (${apps.length} รายการ)`,
+    contents: {
+      type: 'bubble',
+      size: 'mega',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: '#1e293b',
+        paddingAll: '16px',
+        contents: [
+          { type: 'text', text: 'iRAM-U Services', color: '#94a3b8', size: 'xs' },
+          { type: 'text', text: 'สถานะคำขอรับเงินรางวัลวิจัย', color: '#ffffff', size: 'md', weight: 'bold', margin: 'xs' }
+        ]
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        paddingAll: '16px',
+        contents: [
+          {
+            type: 'text',
+            text: `อีเมล: ${email}`,
+            size: 'xs',
+            color: '#64748b',
+            margin: 'none'
+          },
+          { type: 'separator', margin: 'sm' },
+          {
+            type: 'box',
+            layout: 'vertical',
+            margin: 'md',
+            contents: appBoxes
+          }
+        ]
+      },
+      footer: {
+        type: 'box',
+        layout: 'vertical',
+        contents: [
+          {
+            type: 'text',
+            text: 'สอบถามเพิ่มเติม งานบริหารงานวิจัย โทร. 055-967924',
+            size: 'xxs',
+            color: '#94a3b8',
+            align: 'center'
+          }
+        ]
+      }
+    }
+  };
+}
+
+function buildMilestoneFlex(data: {
+  trackingNo: string;
+  milestone: string;
+  applicantName: string;
+  articleTitle: string;
+  totalAmount?: number;
+  details?: string;
+  notes?: string;
+}) {
+  const milestoneConfig: Record<string, { title: string; color: string; bg: string; step: string }> = {
+    application_submitted: {
+      title: 'ยื่นคำขอรับรางวัลสำเร็จ',
+      color: '#1d4ed8',
+      bg: '#1e3a8a',
+      step: 'ขั้นตอนที่ 1/12 (Submitted)'
+    },
+    document_verified: {
+      title: 'ผ่านการตรวจสอบเอกสารแล้ว',
+      color: '#4338ca',
+      bg: '#312e81',
+      step: 'ขั้นตอนที่ 4/12 (Verified)'
+    },
+    dean_approved: {
+      title: 'คณบดีลงนามอนุมัติแล้ว',
+      color: '#b45309',
+      bg: '#78350f',
+      step: 'ขั้นตอนที่ 7/12 (Approved)'
+    },
+    payment_transferred: {
+      title: 'งานการเงินโอนเงินแล้ว 🎉',
+      color: '#15803d',
+      bg: '#14532d',
+      step: 'ขั้นตอนที่ 11/12 (Transferred)'
+    }
+  };
+
+  const meta = milestoneConfig[data.milestone] || {
+    title: 'อัปเดตสถานะคำขอรับรางวัล',
+    color: '#0284c7',
+    bg: '#0f172a',
+    step: 'อัปเดตสถานะ'
+  };
+
+  const formattedAmount = (data.totalAmount || 0).toLocaleString('th-TH', { maximumFractionDigits: 0 });
+
+  return {
+    type: 'flex',
+    altText: `🔔 [${data.trackingNo}] ${meta.title}`,
+    contents: {
+      type: 'bubble',
+      size: 'mega',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: meta.bg,
+        paddingAll: '18px',
+        contents: [
+          { type: 'text', text: `iRAM-U Services • ${data.trackingNo}`, color: '#cbd5e1', size: 'xs', weight: 'bold' },
+          { type: 'text', text: meta.title, color: '#ffffff', size: 'lg', weight: 'bold', margin: 'xs' },
+          { type: 'text', text: meta.step, color: '#38bdf8', size: 'xxs', margin: 'xs' }
+        ]
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        paddingAll: '18px',
+        spacing: 'sm',
+        contents: [
+          {
+            type: 'box',
+            layout: 'vertical',
+            spacing: 'xxs',
+            contents: [
+              { type: 'text', text: 'ผู้ยื่นคำขอ', size: 'xs', color: '#64748b' },
+              { type: 'text', text: data.applicantName || 'อาจารย์/นักวิจัย', size: 'sm', weight: 'bold', color: '#1e293b' }
+            ]
+          },
+          {
+            type: 'box',
+            layout: 'vertical',
+            spacing: 'xxs',
+            contents: [
+              { type: 'text', text: 'บทความวิจัย', size: 'xs', color: '#64748b' },
+              { type: 'text', text: data.articleTitle || '-', size: 'xs', color: '#334155', wrap: true }
+            ]
+          },
+          data.totalAmount ? {
+            type: 'box',
+            layout: 'horizontal',
+            margin: 'sm',
+            contents: [
+              { type: 'text', text: 'ยอดเงินรวม:', size: 'xs', color: '#64748b', flex: 0 },
+              { type: 'text', text: ` ฿${formattedAmount} บาท`, size: 'xs', weight: 'bold', color: '#0f766e' }
+            ]
+          } : { type: 'box', layout: 'vertical', contents: [] },
+          data.details ? {
+            type: 'box',
+            layout: 'vertical',
+            backgroundColor: '#f1f5f9',
+            paddingAll: '10px',
+            cornerRadius: '6px',
+            margin: 'sm',
+            contents: [
+              { type: 'text', text: data.details, size: 'xxs', color: '#475569', wrap: true }
+            ]
+          } : { type: 'box', layout: 'vertical', contents: [] },
+          data.notes ? {
+            type: 'text',
+            text: `💡 ${data.notes}`,
+            size: 'xxs',
+            color: '#64748b',
+            wrap: true,
+            margin: 'xs'
+          } : { type: 'box', layout: 'vertical', contents: [] }
+        ]
+      },
+      footer: {
+        type: 'box',
+        layout: 'vertical',
+        contents: [
+          {
+            type: 'text',
+            text: 'ติดตามรายละเอียดได้ที่ระบบ iRAM Reward System',
+            size: 'xxs',
+            color: '#94a3b8',
+            align: 'center'
+          }
+        ]
+      }
+    }
+  };
+}
+
+// === LINE WEBHOOK ROUTES ===
+
+app.get('/api/line/webhook', (c) => {
+  return c.json({
+    status: 'ok',
+    message: 'iRAM LINE Webhook endpoint is active and listening.',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.post('/api/line/webhook', async (c) => {
+  const token = c.env.LINE_CHANNEL_ACCESS_TOKEN || '';
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch (e) {
+    return c.text('Invalid JSON', 400);
+  }
+
+  const events = body.events || [];
+  for (const event of events) {
+    const replyToken = event.replyToken;
+    const lineUserId = event.source?.userId;
+
+    // Event: User follows / adds bot
+    if (event.type === 'follow') {
+      if (replyToken) {
+        await sendLineReply(replyToken, [buildLineWelcomeFlex()], token);
+      }
+      continue;
+    }
+
+    // Event: User sends text message
+    if (event.type === 'message' && event.message?.type === 'text') {
+      const text = (event.message.text || '').trim();
+      const emailMatch = text.match(/[a-zA-Z0-9._%+-]+@nu\.ac\.th/i);
+
+      // 1. Message contains @nu.ac.th -> Auto Link Account
+      if (emailMatch) {
+        const email = emailMatch[0].toLowerCase().trim();
+
+        // Check if user exists in irUser
+        const existingUser: any = await c.env.DB.prepare(`
+          SELECT * FROM irUser WHERE LOWER(TRIM(email)) = ?
+        `).bind(email).first();
+
+        let displayName = email;
+        let dept = 'คณะแพทยศาสตร์ มหาวิทยาลัยนเรศวร';
+
+        if (existingUser) {
+          // Link lineUserId
+          await c.env.DB.prepare(`
+            UPDATE irUser 
+            SET lineUserId = ?, lineLinkedAt = datetime('now'), updatedAt = datetime('now')
+            WHERE id = ?
+          `).bind(lineUserId, existingUser.id).run();
+
+          const nameParts = [existingUser.titleTh, existingUser.firstNameTh, existingUser.lastNameTh].filter(Boolean);
+          displayName = nameParts.length > 0 ? nameParts.join(' ') : (existingUser.name || email);
+          if (existingUser.department) dept = existingUser.department;
+        } else {
+          // Register new user row with lineUserId
+          const newId = crypto.randomUUID();
+          await c.env.DB.prepare(`
+            INSERT INTO irUser (id, email, name, role, lineUserId, lineLinkedAt, department, createdAt, updatedAt)
+            VALUES (?, ?, ?, 'MEMBER', ?, datetime('now'), ?, datetime('now'), datetime('now'))
+          `).bind(newId, email, email, lineUserId, dept).run();
+        }
+
+        if (replyToken) {
+          await sendLineReply(replyToken, [buildLineLinkedFlex(displayName, email, dept)], token);
+        }
+        continue;
+      }
+
+      // 2. Message asks for Status
+      const isStatusQuery = /(สถานะ|status|เช็ค|คำขอ|ติดตาม|เงินรางวัล)/i.test(text);
+      if (isStatusQuery) {
+        const linkedUser: any = await c.env.DB.prepare(`
+          SELECT * FROM irUser WHERE lineUserId = ? LIMIT 1
+        `).bind(lineUserId).first();
+
+        if (linkedUser && linkedUser.email) {
+          const { results: apps } = await c.env.DB.prepare(`
+            SELECT trackingNo, articleTitle, status, currentStep, totalClaimedAmount, createdAt
+            FROM irRewardApplication
+            WHERE LOWER(TRIM(email)) = ?
+            ORDER BY createdAt DESC
+            LIMIT 5
+          `).bind(linkedUser.email.toLowerCase().trim()).all();
+
+          if (replyToken) {
+            await sendLineReply(replyToken, [buildLineStatusFlex(linkedUser.email, apps || [])], token);
+          }
+        } else {
+          if (replyToken) {
+            await sendLineReply(replyToken, [{
+              type: 'text',
+              text: `⚠️ ท่านยังไม่ได้ผูกบัญชีอีเมล @nu.ac.th กับระบบ\n\nกรุณาพิมพ์ส่งอีเมลมหาวิทยาลัยของท่าน (เช่น somchaij@nu.ac.th) เข้ามาในห้องแชทนี้ เพื่อตรวจสอบสถานะคำขอครับ`
+            }], token);
+          }
+        }
+        continue;
+      }
+
+      // 3. Other messages / Help
+      const linkedUser: any = await c.env.DB.prepare(`
+        SELECT * FROM irUser WHERE lineUserId = ? LIMIT 1
+      `).bind(lineUserId).first();
+
+      if (replyToken) {
+        if (linkedUser && linkedUser.email) {
+          await sendLineReply(replyToken, [{
+            type: 'text',
+            text: `สวัสดีครับอาจารย์/นักวิจัย 🙏\n\nบัญชี LINE ของท่านเชื่อมต่อกับ:\n📧 ${linkedUser.email}\n\n📌 คำสั่งที่ใช้งานได้:\n• พิมพ์ 'สถานะ' เพื่อตรวจสอบความคืบหน้าคำขอเงินรางวัลล่าสุด\n• พิมพ์อีเมล @nu.ac.th ใหม่ หากต้องการเปลี่ยนอีเมลที่เชื่อมต่อ\n\n📞 ติดต่อสอบถาม: งานบริหารงานวิจัย คณะแพทยศาสตร์ โทร. 055-967924`
+          }], token);
+        } else {
+          await sendLineReply(replyToken, [buildLineWelcomeFlex()], token);
+        }
+      }
+    }
+  }
+
+  return c.text('OK');
+});
+
+// Endpoint to trigger push notification from backend or cron
+app.post('/api/line/push-milestone', async (c) => {
+  try {
+    const token = c.env.LINE_CHANNEL_ACCESS_TOKEN || '';
+    const body = await c.req.json();
+    const { email, trackingNo, milestone, applicantName, articleTitle, totalAmount, details, notes } = body;
+
+    if (!email && !body.lineUserId) {
+      return c.json({ error: 'Missing email or lineUserId' }, 400);
+    }
+
+    let targetLineUserId = body.lineUserId;
+    if (!targetLineUserId && email) {
+      const user: any = await c.env.DB.prepare(`
+        SELECT lineUserId FROM irUser WHERE LOWER(TRIM(email)) = ? AND lineUserId IS NOT NULL
+      `).bind(email.toLowerCase().trim()).first();
+      targetLineUserId = user?.lineUserId;
+    }
+
+    if (!targetLineUserId) {
+      return c.json({
+        status: 'skipped',
+        message: `No linked LINE User ID found for email: ${email}`
+      });
+    }
+
+    const flexMsg = buildMilestoneFlex({
+      trackingNo: trackingNo || 'IRAM',
+      milestone: milestone || 'application_submitted',
+      applicantName: applicantName || 'อาจารย์/นักวิจัย',
+      articleTitle: articleTitle || 'บทความวิจัย',
+      totalAmount: totalAmount || 0,
+      details,
+      notes
+    });
+
+    const success = await sendLinePush(targetLineUserId, [flexMsg], token);
+
+    if (success && trackingNo) {
+      await c.env.DB.prepare(`
+        UPDATE irRewardApplication 
+        SET lineNotified = 1, lineLastSentAt = datetime('now')
+        WHERE trackingNo = ?
+      `).bind(trackingNo).run();
+    }
+
+    return c.json({ status: success ? 'sent' : 'failed', targetLineUserId });
   } catch (e: any) {
     return c.json({ error: e.message }, 500);
   }
