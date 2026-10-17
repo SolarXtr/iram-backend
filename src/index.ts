@@ -1502,11 +1502,34 @@ app.put('/api/users/profile/:id', async (c) => {
     if (idCardNo !== undefined) { updates.push('idCardNo = ?'); params.push(idCardNo); }
     if (role !== undefined) { updates.push('role = ?'); params.push(normalizeRole(role)); }
     if (roles !== undefined) { updates.push('rolesJson = ?'); params.push(JSON.stringify(roles)); }
-    if (status !== undefined) { updates.push('status = ?'); params.push(status); }
     if (lastLoginAt !== undefined) { updates.push('lastLoginAt = ?'); params.push(lastLoginAt); }
 
     params.push(id);
     await c.env.DB.prepare(`UPDATE irUser SET ${updates.join(', ')} WHERE id = ?`).bind(...params).run();
+
+    if (status !== undefined) {
+      const profile: any = await c.env.DB.prepare(
+        'SELECT id FROM irResearcherProfile WHERE userId = ?'
+      ).bind(id).first();
+
+      if (profile) {
+        await c.env.DB.prepare(
+          'UPDATE irResearcherProfile SET status = ? WHERE userId = ?'
+        ).bind(status, id).run();
+      } else {
+        await c.env.DB.prepare(`
+          INSERT INTO irResearcherProfile (id, userId, department, status, orcid, scopusAuthorId)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).bind(
+          crypto.randomUUID(),
+          id,
+          department ?? existing.department ?? 'Faculty of Medicine',
+          status,
+          orcid ?? existing.orcid ?? null,
+          scopusAuthorId ?? existing.scopusAuthorId ?? null
+        ).run();
+      }
+    }
 
     return c.json({ status: 'updated', id, shortNameEn: computedShortName });
   } catch (e: any) {
