@@ -1209,9 +1209,9 @@ app.get('/api/users/profile/:email', async (c) => {
         COALESCE(p.status, 'active') as status
       FROM irUser u
       LEFT JOIN irResearcherProfile p ON u.id = p.userId
-      WHERE LOWER(u.email) = ?
+      WHERE LOWER(u.email) = ? OR u.id = ?
       LIMIT 1
-    `).bind(email).first();
+    `).bind(email, email).first();
 
     if (!row) {
       return c.json({ error: 'User not found' }, 404);
@@ -1424,7 +1424,7 @@ app.put('/api/users/profile/:id', async (c) => {
     } = body;
 
     // Fetch existing user to detect promotions and changes
-    const existing: any = await c.env.DB.prepare('SELECT * FROM irUser WHERE id = ?').bind(id).first();
+    const existing: any = await c.env.DB.prepare('SELECT * FROM irUser WHERE id = ? OR LOWER(email) = LOWER(?)').bind(id, id).first();
     if (!existing) {
       return c.json({ error: 'User not found' }, 404);
     }
@@ -1435,7 +1435,7 @@ app.put('/api/users/profile/:id', async (c) => {
       await c.env.DB.prepare(`
         INSERT INTO irResearcherProfileHistory (id, userId, changedField, oldValue, newValue, effectiveDate, reason)
         VALUES (?, ?, 'academicPosition', ?, ?, ?, ?)
-      `).bind(historyId, id, existing.academicPosition, academicPosition, effectiveDate, changeReason).run();
+      `).bind(historyId, existing.id, existing.academicPosition, academicPosition, effectiveDate, changeReason).run();
     }
 
     // 2. Audit Log: Title Change
@@ -1444,7 +1444,7 @@ app.put('/api/users/profile/:id', async (c) => {
       await c.env.DB.prepare(`
         INSERT INTO irResearcherProfileHistory (id, userId, changedField, oldValue, newValue, effectiveDate, reason)
         VALUES (?, ?, 'titleTh', ?, ?, ?, ?)
-      `).bind(historyId, id, existing.titleTh, titleTh, effectiveDate, changeReason).run();
+      `).bind(historyId, existing.id, existing.titleTh, titleTh, effectiveDate, changeReason).run();
     }
 
     // 3. Audit Log: Name/Surname Change & Short Name Alias Preservation
@@ -1475,7 +1475,7 @@ app.put('/api/users/profile/:id', async (c) => {
 
     if (email !== undefined && typeof email === 'string' && email.trim()) {
       const cleanEmail = email.trim().toLowerCase();
-      const emailConflict: any = await c.env.DB.prepare('SELECT id FROM irUser WHERE LOWER(email) = ? AND id != ?').bind(cleanEmail, id).first();
+      const emailConflict: any = await c.env.DB.prepare('SELECT id FROM irUser WHERE LOWER(email) = ? AND id != ?').bind(cleanEmail, existing.id).first();
       if (emailConflict) {
         return c.json({ error: `อีเมล ${cleanEmail} ถูกใช้งานโดยบัญชีอื่นแล้ว` }, 409);
       }
@@ -1504,25 +1504,25 @@ app.put('/api/users/profile/:id', async (c) => {
     if (roles !== undefined) { updates.push('rolesJson = ?'); params.push(JSON.stringify(roles)); }
     if (lastLoginAt !== undefined) { updates.push('lastLoginAt = ?'); params.push(lastLoginAt); }
 
-    params.push(id);
+    params.push(existing.id);
     await c.env.DB.prepare(`UPDATE irUser SET ${updates.join(', ')} WHERE id = ?`).bind(...params).run();
 
     if (status !== undefined) {
       const profile: any = await c.env.DB.prepare(
         'SELECT id FROM irResearcherProfile WHERE userId = ?'
-      ).bind(id).first();
+      ).bind(existing.id).first();
 
       if (profile) {
         await c.env.DB.prepare(
           'UPDATE irResearcherProfile SET status = ? WHERE userId = ?'
-        ).bind(status, id).run();
+        ).bind(status, existing.id).run();
       } else {
         await c.env.DB.prepare(`
           INSERT INTO irResearcherProfile (id, userId, department, status, orcid, scopusAuthorId)
           VALUES (?, ?, ?, ?, ?, ?)
         `).bind(
           crypto.randomUUID(),
-          id,
+          existing.id,
           department ?? existing.department ?? 'Faculty of Medicine',
           status,
           orcid ?? existing.orcid ?? null,
@@ -1531,7 +1531,7 @@ app.put('/api/users/profile/:id', async (c) => {
       }
     }
 
-    return c.json({ status: 'updated', id, shortNameEn: computedShortName });
+    return c.json({ status: 'updated', id: existing.id, shortNameEn: computedShortName });
   } catch (e: any) {
     return c.json({ error: e.message }, 500);
   }
