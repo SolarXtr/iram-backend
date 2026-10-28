@@ -1065,23 +1065,28 @@ app.delete('/api/rewards/:id', async (c) => {
 
 // === REWARD USER REGISTRY & PROFILE ENDPOINTS ===
 
-function normalizeRole(roleStr?: string): 'researcher' | 'coordinator' | 'finance' | 'executive' | 'admin' {
+type RewardRole = 'researcher' | 'dept_secretary' | 'coordinator' | 'finance' | 'executive' | 'admin';
+
+function normalizeRole(roleStr?: string): RewardRole {
   if (!roleStr) return 'researcher';
   const r = roleStr.toLowerCase().trim();
   if (r === 'admin') return 'admin';
+  if (r === 'dept_secretary' || r === 'department_secretary' || r === 'dept-secretary') return 'dept_secretary';
   if (r === 'coordinator' || r === 'staff') return 'coordinator';
   if (r === 'finance') return 'finance';
   if (r === 'executive') return 'executive';
   return 'researcher';
 }
 
-function parseRoles(rolesJson?: string | null, primaryRole?: string): ('researcher' | 'coordinator' | 'finance' | 'executive' | 'admin')[] {
+function parseRoles(rolesJson?: string | null, primaryRole?: string): RewardRole[] {
   const normPrimary = normalizeRole(primaryRole);
   if (rolesJson) {
     try {
       const parsed = JSON.parse(rolesJson);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((x: string) => normalizeRole(x));
+        const unique = Array.from(new Set<RewardRole>(parsed.map((x: string) => normalizeRole(x))));
+        if (!unique.includes(normPrimary)) unique.unshift(normPrimary);
+        return unique;
       }
     } catch (e) {}
   }
@@ -1288,7 +1293,7 @@ app.post('/api/users', async (c) => {
 
     const cleanEmail = email.trim().toLowerCase();
     const cleanRole = normalizeRole(role);
-    const rolesJson = JSON.stringify(roles || [cleanRole]);
+    const rolesJson = JSON.stringify(Array.from(new Set<RewardRole>([cleanRole, ...((Array.isArray(roles) ? roles : [cleanRole]) as string[]).map((x) => normalizeRole(x))])));
 
     // Check existing
     const existing: any = await c.env.DB.prepare('SELECT * FROM irUser WHERE LOWER(email) = ?').bind(cleanEmail).first();
@@ -1501,7 +1506,7 @@ app.put('/api/users/profile/:id', async (c) => {
     if (bankAccountNo !== undefined) { updates.push('bankAccountNo = ?'); params.push(bankAccountNo); }
     if (idCardNo !== undefined) { updates.push('idCardNo = ?'); params.push(idCardNo); }
     if (role !== undefined) { updates.push('role = ?'); params.push(normalizeRole(role)); }
-    if (roles !== undefined) { updates.push('rolesJson = ?'); params.push(JSON.stringify(roles)); }
+    if (roles !== undefined) { updates.push('rolesJson = ?'); params.push(JSON.stringify(Array.from(new Set((Array.isArray(roles) ? roles : [roles]).map((x: string) => normalizeRole(x)))))); }
     if (lastLoginAt !== undefined) { updates.push('lastLoginAt = ?'); params.push(lastLoginAt); }
 
     params.push(existing.id);
