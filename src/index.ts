@@ -866,15 +866,16 @@ app.get('/api/rewards', async (c) => {
     const stmt = c.env.DB.prepare(query);
     const { results } = params.length > 0 ? await stmt.bind(...params).all() : await stmt.all();
 
-    // Parse JSON fields
-    const parsed = (results || []).map((row: any) => ({
-      ...row,
-      database: row.database || row.databaseName || 'Scopus',
-      databaseName: row.databaseName || row.database || 'Scopus',
-      pdpaConsentAccepted: Boolean(row.pdpaConsentAccepted),
-      isTier1Top10: Boolean(row.isTier1Top10),
-      timeline: row.timelineJson ? JSON.parse(row.timelineJson) : [],
-      attachments: row.attachmentsJson ? JSON.parse(row.attachmentsJson) : []
+    // Parse JSON fields
+    const parsed = (results || []).map((row: any) => ({
+      ...row,
+      database: row.database || row.databaseName || 'Scopus',
+      databaseName: row.databaseName || row.database || 'Scopus',
+      pdpaConsentAccepted: Boolean(row.pdpaConsentAccepted),
+      isTier1Top10: Boolean(row.isTier1Top10),
+      isOnlineReviewComplete: Boolean(row.isOnlineReviewComplete),
+      timeline: row.timelineJson ? JSON.parse(row.timelineJson) : [],
+      attachments: row.attachmentsJson ? JSON.parse(row.attachmentsJson) : []
     }));
 
     // Tier 3 Cache: Real-time with no-cache, must-revalidate
@@ -885,273 +886,326 @@ app.get('/api/rewards', async (c) => {
   }
 });
 
-// 3. Create or Upsert Reward Application
-app.post('/api/rewards', async (c) => {
-  try {
-    const body = await c.req.json();
-    let {
-      id = `app-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      trackingNo,
-      fiscalYear = 2570,
-      applicantName,
-      academicPosition = '',
-      department = '',
-      phone = '',
-      email = '',
-      bankName = 'ธนาคารกรุงศรีอยุธยา สาขามหาวิทยาลัยนเรศวร',
-      bankAccountNo = '',
-      idCardNo = '',
-      pdpaConsentAccepted = 1,
-      pdpaConsentDate = new Date().toISOString(),
-      requestType = 'both',
-      articleTitle,
-      journalName = '',
-      journalScope = 'international',
-      database,
-      databaseName,
-      quartile = 'Q1',
-      isTier1Top10 = 0,
-      authorRole = 'first_author',
-      articleType = 'research_article',
-      issn = '',
-      doi = '',
-      volumeIssue = '',
-      publishedDate = new Date().toISOString().split('T')[0],
-      claimedRewardAmount = 0,
-      claimedPageChargeAmount = 0,
-      approvedPageChargeAmount = 0,
-      totalClaimedAmount = 0,
-      currentStep = 1,
-      status = 'submitted',
-      timeline = [],
-      attachments = []
-    } = body;
-
-    const resolvedDatabase = databaseName || database || 'Scopus';
-
-    // If trackingNo is empty, 'DRAFT', or starts with 'DRAFT', ensure unique trackingNo so D1 unique constraint never fails
-    let resolvedTrackingNo = trackingNo;
-    if (!resolvedTrackingNo || resolvedTrackingNo === 'DRAFT' || resolvedTrackingNo.startsWith('DRAFT')) {
-      if (status === 'draft') {
-        resolvedTrackingNo = (!resolvedTrackingNo || resolvedTrackingNo === 'DRAFT')
-          ? `DRAFT-${fiscalYear}-${id.slice(-6).toUpperCase()}`
-          : resolvedTrackingNo;
-      } else {
-        // Submitted application must have a valid sequential trackingNo
-        resolvedTrackingNo = resolvedTrackingNo && !resolvedTrackingNo.startsWith('DRAFT')
-          ? resolvedTrackingNo
-          : `AWP${String(fiscalYear).slice(-2)}-${Date.now().toString().slice(-4)}`;
-      }
-    }
-
-    if (!applicantName || !articleTitle) {
-      return c.json({ error: 'Missing required fields: applicantName, articleTitle' }, 400);
-    }
-
-    // Double-check duplicate before insert (excluding current id)
-    if (doi && doi.trim()) {
-      const existing = await c.env.DB.prepare(`
-        SELECT id, trackingNo FROM irRewardApplication 
-        WHERE LOWER(TRIM(doi)) = LOWER(TRIM(?)) AND status != 'rejected' AND id != ?
-      `).bind(doi.trim(), id).first();
-      if (existing) {
-        return c.json({ error: `บทความที่มี DOI นี้มีคำขออยู่ในระบบแล้ว (${(existing as any).trackingNo})` }, 409);
-      }
-    }
-
-    // Check if record with this id already exists: If yes, update it
-    const existingRecord = await c.env.DB.prepare(`SELECT id FROM irRewardApplication WHERE id = ?`).bind(id).first();
-    if (existingRecord) {
-      await c.env.DB.prepare(`
-        UPDATE irRewardApplication SET
-          trackingNo = ?, fiscalYear = ?, applicantName = ?, academicPosition = ?, department = ?, phone = ?, email = ?,
-          bankName = ?, bankAccountNo = ?, idCardNo = ?, pdpaConsentAccepted = ?, pdpaConsentDate = ?,
-          requestType = ?, articleTitle = ?, journalName = ?, journalScope = ?, databaseName = ?, quartile = ?, isTier1Top10 = ?,
-          authorRole = ?, articleType = ?, issn = ?, doi = ?, volumeIssue = ?, publishedDate = ?,
-          claimedRewardAmount = ?, claimedPageChargeAmount = ?, approvedPageChargeAmount = ?, totalClaimedAmount = ?,
-          currentStep = ?, status = ?, timelineJson = ?, attachmentsJson = ?, updatedAt = datetime('now')
-        WHERE id = ?
-      `).bind(
-        resolvedTrackingNo, Number(fiscalYear) || 2570, applicantName, academicPosition, department, phone, email,
-        bankName, bankAccountNo, idCardNo, pdpaConsentAccepted ? 1 : 0, pdpaConsentDate,
-        requestType, articleTitle, journalName, journalScope, resolvedDatabase, quartile, isTier1Top10 ? 1 : 0,
-        authorRole, articleType, issn, doi, volumeIssue, publishedDate,
-        Number(claimedRewardAmount) || 0, Number(claimedPageChargeAmount) || 0, Number(approvedPageChargeAmount) || 0, Number(totalClaimedAmount) || 0,
-        Number(currentStep) || 1, status, JSON.stringify(timeline || []), JSON.stringify(attachments || []),
-        id
-      ).run();
-      return c.json({ status: 'updated', id, trackingNo: resolvedTrackingNo }, 200);
-    }
-
-    await c.env.DB.prepare(`
-      INSERT INTO irRewardApplication (
-        id, trackingNo, fiscalYear, applicantName, academicPosition, department, phone, email,
-        bankName, bankAccountNo, idCardNo, pdpaConsentAccepted, pdpaConsentDate,
-        requestType, articleTitle, journalName, journalScope, databaseName, quartile, isTier1Top10,
-        authorRole, articleType, issn, doi, volumeIssue, publishedDate,
-        claimedRewardAmount, claimedPageChargeAmount, approvedPageChargeAmount, totalClaimedAmount,
-        currentStep, status, timelineJson, attachmentsJson, createdAt, updatedAt
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?, datetime('now'), datetime('now')
-      )
-    `).bind(
-      id,
-      resolvedTrackingNo,
-      Number(fiscalYear) || 2570,
-      applicantName ?? '',
-      academicPosition ?? '',
-      department ?? '',
-      phone ?? '',
-      email ?? '',
-      bankName ?? 'ธนาคารกรุงศรีอยุธยา สาขามหาวิทยาลัยนเรศวร',
-      bankAccountNo ?? '',
-      idCardNo ?? '',
-      pdpaConsentAccepted ? 1 : 0,
-      pdpaConsentDate ?? new Date().toISOString(),
-      requestType ?? 'both',
-      articleTitle ?? '',
-      journalName ?? '',
-      journalScope ?? 'international',
-      resolvedDatabase ?? 'Scopus',
-      quartile ?? 'Q1',
-      isTier1Top10 ? 1 : 0,
-      authorRole ?? 'first_author',
-      articleType ?? 'research_article',
-      issn ?? '',
-      doi ?? '',
-      volumeIssue ?? '',
-      publishedDate ?? '',
-      Number(claimedRewardAmount) || 0,
-      Number(claimedPageChargeAmount) || 0,
-      Number(approvedPageChargeAmount) || 0,
-      Number(totalClaimedAmount) || 0,
-      Number(currentStep) || 1,
-      status ?? 'submitted',
-      JSON.stringify(timeline || []),
-      JSON.stringify(attachments || [])
-    ).run();
-
-    return c.json({ status: 'success', id, trackingNo: resolvedTrackingNo }, 201);
-  } catch (e: any) {
-    return c.json({ error: e.message }, 500);
-  }
-});
-
-// 4. Update Application Status & Workflow Documents
-app.put('/api/rewards/:id', async (c) => {
-  try {
-    const id = c.req.param('id');
-    const body = await c.req.json();
-
-    const {
-      trackingNo,
-      fiscalYear,
-      applicantName,
-      academicPosition,
-      department,
-      phone,
-      email,
-      bankName,
-      bankAccountNo,
-      idCardNo,
-      pdpaConsentAccepted,
-      pdpaConsentDate,
-      requestType,
-      articleTitle,
-      journalName,
-      journalScope,
-      database,
-      databaseName,
-      quartile,
-      isTier1Top10,
-      authorRole,
-      articleType,
-      issn,
-      doi,
-      volumeIssue,
-      publishedDate,
-      claimedRewardAmount,
-      claimedPageChargeAmount,
-      approvedPageChargeAmount,
-      totalClaimedAmount,
-      status,
-      currentStep,
-      internalDocNo,
-      researchDocRecNo,
-      financeDocRecNo,
-      disbursementVoucherNo,
-      blueSlipNo,
-      budgetExpenseCode,
-      actualPaidAmount,
-      paymentStatus,
-      paymentDate,
-      paymentTransferSlipUrl,
-      coordinatorNotes,
-      timeline,
-      attachments
-    } = body;
-
-    let updates: string[] = ["updatedAt = datetime('now')"];
-    const params: any[] = [];
-
-    if (trackingNo !== undefined) { updates.push('trackingNo = ?'); params.push(trackingNo); }
-    if (fiscalYear !== undefined) { updates.push('fiscalYear = ?'); params.push(Number(fiscalYear)); }
-    if (applicantName !== undefined) { updates.push('applicantName = ?'); params.push(applicantName); }
-    if (academicPosition !== undefined) { updates.push('academicPosition = ?'); params.push(academicPosition); }
-    if (department !== undefined) { updates.push('department = ?'); params.push(department); }
-    if (phone !== undefined) { updates.push('phone = ?'); params.push(phone); }
-    if (email !== undefined) { updates.push('email = ?'); params.push(email); }
-    if (bankName !== undefined) { updates.push('bankName = ?'); params.push(bankName); }
-    if (bankAccountNo !== undefined) { updates.push('bankAccountNo = ?'); params.push(bankAccountNo); }
-    if (idCardNo !== undefined) { updates.push('idCardNo = ?'); params.push(idCardNo); }
-    if (pdpaConsentAccepted !== undefined) { updates.push('pdpaConsentAccepted = ?'); params.push(pdpaConsentAccepted ? 1 : 0); }
-    if (pdpaConsentDate !== undefined) { updates.push('pdpaConsentDate = ?'); params.push(pdpaConsentDate); }
-    if (requestType !== undefined) { updates.push('requestType = ?'); params.push(requestType); }
-    if (articleTitle !== undefined) { updates.push('articleTitle = ?'); params.push(articleTitle); }
-    if (journalName !== undefined) { updates.push('journalName = ?'); params.push(journalName); }
-    if (journalScope !== undefined) { updates.push('journalScope = ?'); params.push(journalScope); }
-    if (databaseName !== undefined || database !== undefined) { updates.push('databaseName = ?'); params.push(databaseName || database); }
-    if (quartile !== undefined) { updates.push('quartile = ?'); params.push(quartile); }
-    if (isTier1Top10 !== undefined) { updates.push('isTier1Top10 = ?'); params.push(isTier1Top10 ? 1 : 0); }
-    if (authorRole !== undefined) { updates.push('authorRole = ?'); params.push(authorRole); }
-    if (articleType !== undefined) { updates.push('articleType = ?'); params.push(articleType); }
-    if (issn !== undefined) { updates.push('issn = ?'); params.push(issn); }
-    if (doi !== undefined) { updates.push('doi = ?'); params.push(doi); }
-    if (volumeIssue !== undefined) { updates.push('volumeIssue = ?'); params.push(volumeIssue); }
-    if (publishedDate !== undefined) { updates.push('publishedDate = ?'); params.push(publishedDate); }
-    if (claimedRewardAmount !== undefined) { updates.push('claimedRewardAmount = ?'); params.push(Number(claimedRewardAmount)); }
-    if (claimedPageChargeAmount !== undefined) { updates.push('claimedPageChargeAmount = ?'); params.push(Number(claimedPageChargeAmount)); }
-    if (approvedPageChargeAmount !== undefined) { updates.push('approvedPageChargeAmount = ?'); params.push(Number(approvedPageChargeAmount)); }
-    if (totalClaimedAmount !== undefined) { updates.push('totalClaimedAmount = ?'); params.push(Number(totalClaimedAmount)); }
-    if (status !== undefined) { updates.push('status = ?'); params.push(status); }
-    if (currentStep !== undefined) { updates.push('currentStep = ?'); params.push(currentStep); }
-    if (internalDocNo !== undefined) { updates.push('internalDocNo = ?'); params.push(internalDocNo); }
-    if (researchDocRecNo !== undefined) { updates.push('researchDocRecNo = ?'); params.push(researchDocRecNo); }
-    if (financeDocRecNo !== undefined) { updates.push('financeDocRecNo = ?'); params.push(financeDocRecNo); }
-    if (disbursementVoucherNo !== undefined) { updates.push('disbursementVoucherNo = ?'); params.push(disbursementVoucherNo); }
-    if (blueSlipNo !== undefined) { updates.push('blueSlipNo = ?'); params.push(blueSlipNo); }
-    if (budgetExpenseCode !== undefined) { updates.push('budgetExpenseCode = ?'); params.push(budgetExpenseCode); }
-    if (actualPaidAmount !== undefined) { updates.push('actualPaidAmount = ?'); params.push(actualPaidAmount); }
-    if (paymentStatus !== undefined) { updates.push('paymentStatus = ?'); params.push(paymentStatus); }
-    if (paymentDate !== undefined) { updates.push('paymentDate = ?'); params.push(paymentDate); }
-    if (paymentTransferSlipUrl !== undefined) { updates.push('paymentTransferSlipUrl = ?'); params.push(paymentTransferSlipUrl); }
-    if (coordinatorNotes !== undefined) { updates.push('coordinatorNotes = ?'); params.push(coordinatorNotes); }
-    if (timeline !== undefined) { updates.push('timelineJson = ?'); params.push(JSON.stringify(timeline)); }
-    if (attachments !== undefined) { updates.push('attachmentsJson = ?'); params.push(JSON.stringify(attachments)); }
-
-    params.push(id);
-    const sql = `UPDATE irRewardApplication SET ${updates.join(', ')} WHERE id = ?`;
-    await c.env.DB.prepare(sql).bind(...params).run();
-
-    return c.json({ status: 'updated', id });
-  } catch (e: any) {
-    return c.json({ error: e.message }, 500);
-  }
+// 3. Create or Upsert Reward Application
+app.post('/api/rewards', async (c) => {
+  try {
+    const body = await c.req.json();
+    let {
+      id = `app-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      trackingNo,
+      fiscalYear = 2570,
+      applicantName,
+      academicPosition = '',
+      department = '',
+      phone = '',
+      email = '',
+      bankName = 'ธนาคารกรุงศรีอยุธยา สาขามหาวิทยาลัยนเรศวร',
+      bankAccountNo = '',
+      idCardNo = '',
+      pdpaConsentAccepted = 1,
+      pdpaConsentDate = new Date().toISOString(),
+      requestType = 'both',
+      articleTitle,
+      journalName = '',
+      journalScope = 'international',
+      database,
+      databaseName,
+      quartile = 'Q1',
+      isTier1Top10 = 0,
+      authorRole = 'first_author',
+      articleType = 'research_article',
+      issn = '',
+      doi = '',
+      volumeIssue = '',
+      publishedDate = new Date().toISOString().split('T')[0],
+      claimedRewardAmount = 0,
+      claimedPageChargeAmount = 0,
+      approvedPageChargeAmount = 0,
+      totalClaimedAmount = 0,
+      currentStep = 1,
+      status = 'submitted',
+      timeline = [],
+      attachments = [],
+      isOnlineReviewComplete = 0,
+      deptCode = '',
+      docRunningNo = '',
+      officialDocDate = '',
+      disbursementDocRunningNo = '',
+      disbursementOfficialDocDate = '',
+      disbursementInternalDocNo = '',
+      databaseYear = '2025',
+      vol = '',
+      no = '',
+      publishMonth = '',
+      publishYear = '',
+      pages = ''
+    } = body;
+
+    const resolvedDatabase = databaseName || database || 'Scopus';
+
+    // If trackingNo is empty, 'DRAFT', or starts with 'DRAFT', ensure unique trackingNo so D1 unique constraint never fails
+    let resolvedTrackingNo = trackingNo;
+    if (!resolvedTrackingNo || resolvedTrackingNo === 'DRAFT' || resolvedTrackingNo.startsWith('DRAFT')) {
+      if (status === 'draft') {
+        resolvedTrackingNo = (!resolvedTrackingNo || resolvedTrackingNo === 'DRAFT')
+          ? `DRAFT-${fiscalYear}-${id.slice(-6).toUpperCase()}`
+          : resolvedTrackingNo;
+      } else {
+        // Submitted application must have a valid sequential trackingNo
+        resolvedTrackingNo = resolvedTrackingNo && !resolvedTrackingNo.startsWith('DRAFT')
+          ? resolvedTrackingNo
+          : `AWP${String(fiscalYear).slice(-2)}-${Date.now().toString().slice(-4)}`;
+      }
+    }
+
+    if (!applicantName || !articleTitle) {
+      return c.json({ error: 'Missing required fields: applicantName, articleTitle' }, 400);
+    }
+
+    // Double-check duplicate before insert (excluding current id)
+    if (doi && doi.trim()) {
+      const existing = await c.env.DB.prepare(`
+        SELECT id, trackingNo FROM irRewardApplication 
+        WHERE LOWER(TRIM(doi)) = LOWER(TRIM(?)) AND status != 'rejected' AND id != ?
+      `).bind(doi.trim(), id).first();
+      if (existing) {
+        return c.json({ error: `บทความที่มี DOI นี้มีคำขออยู่ในระบบแล้ว (${(existing as any).trackingNo})` }, 409);
+      }
+    }
+
+    // Check if record with this id already exists: If yes, update it
+    const existingRecord = await c.env.DB.prepare(`SELECT id FROM irRewardApplication WHERE id = ?`).bind(id).first();
+    if (existingRecord) {
+      await c.env.DB.prepare(`
+        UPDATE irRewardApplication SET
+          trackingNo = ?, fiscalYear = ?, applicantName = ?, academicPosition = ?, department = ?, phone = ?, email = ?,
+          bankName = ?, bankAccountNo = ?, idCardNo = ?, pdpaConsentAccepted = ?, pdpaConsentDate = ?,
+          requestType = ?, articleTitle = ?, journalName = ?, journalScope = ?, databaseName = ?, quartile = ?, isTier1Top10 = ?,
+          authorRole = ?, articleType = ?, issn = ?, doi = ?, volumeIssue = ?, publishedDate = ?,
+          claimedRewardAmount = ?, claimedPageChargeAmount = ?, approvedPageChargeAmount = ?, totalClaimedAmount = ?,
+          currentStep = ?, status = ?, timelineJson = ?, attachmentsJson = ?, isOnlineReviewComplete = ?, deptCode = ?, docRunningNo = ?, officialDocDate = ?, disbursementDocRunningNo = ?, disbursementOfficialDocDate = ?, disbursementInternalDocNo = ?, databaseYear = ?, vol = ?, no = ?, publishMonth = ?, publishYear = ?, pages = ?, updatedAt = datetime('now')
+        WHERE id = ?
+      `).bind(
+        resolvedTrackingNo, Number(fiscalYear) || 2570, applicantName, academicPosition, department, phone, email,
+        bankName, bankAccountNo, idCardNo, pdpaConsentAccepted ? 1 : 0, pdpaConsentDate,
+        requestType, articleTitle, journalName, journalScope, resolvedDatabase, quartile, isTier1Top10 ? 1 : 0,
+        authorRole, articleType, issn, doi, volumeIssue, publishedDate,
+        Number(claimedRewardAmount) || 0, Number(claimedPageChargeAmount) || 0, Number(approvedPageChargeAmount) || 0, Number(totalClaimedAmount) || 0,
+        Number(currentStep) || 1, status, JSON.stringify(timeline || []), JSON.stringify(attachments || []),
+        isOnlineReviewComplete ? 1 : 0, deptCode, docRunningNo, officialDocDate, disbursementDocRunningNo, disbursementOfficialDocDate, disbursementInternalDocNo, databaseYear, vol, no, publishMonth, publishYear, pages,
+        id
+      ).run();
+      return c.json({ status: 'updated', id, trackingNo: resolvedTrackingNo }, 200);
+    }
+
+    await c.env.DB.prepare(`
+      INSERT INTO irRewardApplication (
+        id, trackingNo, fiscalYear, applicantName, academicPosition, department, phone, email,
+        bankName, bankAccountNo, idCardNo, pdpaConsentAccepted, pdpaConsentDate,
+        requestType, articleTitle, journalName, journalScope, databaseName, quartile, isTier1Top10,
+        authorRole, articleType, issn, doi, volumeIssue, publishedDate,
+        claimedRewardAmount, claimedPageChargeAmount, approvedPageChargeAmount, totalClaimedAmount,
+        currentStep, status, timelineJson, attachmentsJson, isOnlineReviewComplete, deptCode, docRunningNo, officialDocDate, disbursementDocRunningNo, disbursementOfficialDocDate, disbursementInternalDocNo, databaseYear, vol, no, publishMonth, publishYear, pages, createdAt, updatedAt
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now')
+      )
+    `).bind(
+      id,
+      resolvedTrackingNo,
+      Number(fiscalYear) || 2570,
+      applicantName ?? '',
+      academicPosition ?? '',
+      department ?? '',
+      phone ?? '',
+      email ?? '',
+      bankName ?? 'ธนาคารกรุงศรีอยุธยา สาขามหาวิทยาลัยนเรศวร',
+      bankAccountNo ?? '',
+      idCardNo ?? '',
+      pdpaConsentAccepted ? 1 : 0,
+      pdpaConsentDate ?? new Date().toISOString(),
+      requestType ?? 'both',
+      articleTitle ?? '',
+      journalName ?? '',
+      journalScope ?? 'international',
+      resolvedDatabase ?? 'Scopus',
+      quartile ?? 'Q1',
+      isTier1Top10 ? 1 : 0,
+      authorRole ?? 'first_author',
+      articleType ?? 'research_article',
+      issn ?? '',
+      doi ?? '',
+      volumeIssue ?? '',
+      publishedDate ?? '',
+      Number(claimedRewardAmount) || 0,
+      Number(claimedPageChargeAmount) || 0,
+      Number(approvedPageChargeAmount) || 0,
+      Number(totalClaimedAmount) || 0,
+      Number(currentStep) || 1,
+      status ?? 'submitted',
+      JSON.stringify(timeline || []),
+      JSON.stringify(attachments || []),
+      isOnlineReviewComplete ? 1 : 0,
+      deptCode ?? '',
+      docRunningNo ?? '',
+      officialDocDate ?? '',
+      disbursementDocRunningNo ?? '',
+      disbursementOfficialDocDate ?? '',
+      disbursementInternalDocNo ?? '',
+      databaseYear ?? '2025',
+      vol ?? '',
+      no ?? '',
+      publishMonth ?? '',
+      publishYear ?? '',
+      pages ?? ''
+    ).run();
+
+    return c.json({ status: 'success', id, trackingNo: resolvedTrackingNo }, 201);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// 4. Update Application Status & Workflow Documents
+app.put('/api/rewards/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+
+    const {
+      trackingNo,
+      fiscalYear,
+      applicantName,
+      academicPosition,
+      department,
+      phone,
+      email,
+      bankName,
+      bankAccountNo,
+      idCardNo,
+      pdpaConsentAccepted,
+      pdpaConsentDate,
+      requestType,
+      articleTitle,
+      journalName,
+      journalScope,
+      database,
+      databaseName,
+      quartile,
+      isTier1Top10,
+      authorRole,
+      articleType,
+      issn,
+      doi,
+      volumeIssue,
+      publishedDate,
+      claimedRewardAmount,
+      claimedPageChargeAmount,
+      approvedPageChargeAmount,
+      totalClaimedAmount,
+      status,
+      currentStep,
+      internalDocNo,
+      researchDocRecNo,
+      financeDocRecNo,
+      disbursementVoucherNo,
+      blueSlipNo,
+      budgetExpenseCode,
+      actualPaidAmount,
+      paymentStatus,
+      paymentDate,
+      paymentTransferSlipUrl,
+      coordinatorNotes,
+      timeline,
+      attachments,
+      isOnlineReviewComplete,
+      deptCode,
+      docRunningNo,
+      officialDocDate,
+      disbursementDocRunningNo,
+      disbursementOfficialDocDate,
+      disbursementInternalDocNo,
+      databaseYear,
+      vol,
+      no,
+      publishMonth,
+      publishYear,
+      pages
+    } = body;
+
+    let updates: string[] = ["updatedAt = datetime('now')"];
+    const params: any[] = [];
+
+    if (trackingNo !== undefined) { updates.push('trackingNo = ?'); params.push(trackingNo); }
+    if (fiscalYear !== undefined) { updates.push('fiscalYear = ?'); params.push(Number(fiscalYear)); }
+    if (applicantName !== undefined) { updates.push('applicantName = ?'); params.push(applicantName); }
+    if (academicPosition !== undefined) { updates.push('academicPosition = ?'); params.push(academicPosition); }
+    if (department !== undefined) { updates.push('department = ?'); params.push(department); }
+    if (phone !== undefined) { updates.push('phone = ?'); params.push(phone); }
+    if (email !== undefined) { updates.push('email = ?'); params.push(email); }
+    if (bankName !== undefined) { updates.push('bankName = ?'); params.push(bankName); }
+    if (bankAccountNo !== undefined) { updates.push('bankAccountNo = ?'); params.push(bankAccountNo); }
+    if (idCardNo !== undefined) { updates.push('idCardNo = ?'); params.push(idCardNo); }
+    if (pdpaConsentAccepted !== undefined) { updates.push('pdpaConsentAccepted = ?'); params.push(pdpaConsentAccepted ? 1 : 0); }
+    if (pdpaConsentDate !== undefined) { updates.push('pdpaConsentDate = ?'); params.push(pdpaConsentDate); }
+    if (requestType !== undefined) { updates.push('requestType = ?'); params.push(requestType); }
+    if (articleTitle !== undefined) { updates.push('articleTitle = ?'); params.push(articleTitle); }
+    if (journalName !== undefined) { updates.push('journalName = ?'); params.push(journalName); }
+    if (journalScope !== undefined) { updates.push('journalScope = ?'); params.push(journalScope); }
+    if (databaseName !== undefined || database !== undefined) { updates.push('databaseName = ?'); params.push(databaseName || database); }
+    if (quartile !== undefined) { updates.push('quartile = ?'); params.push(quartile); }
+    if (isTier1Top10 !== undefined) { updates.push('isTier1Top10 = ?'); params.push(isTier1Top10 ? 1 : 0); }
+    if (authorRole !== undefined) { updates.push('authorRole = ?'); params.push(authorRole); }
+    if (articleType !== undefined) { updates.push('articleType = ?'); params.push(articleType); }
+    if (issn !== undefined) { updates.push('issn = ?'); params.push(issn); }
+    if (doi !== undefined) { updates.push('doi = ?'); params.push(doi); }
+    if (volumeIssue !== undefined) { updates.push('volumeIssue = ?'); params.push(volumeIssue); }
+    if (publishedDate !== undefined) { updates.push('publishedDate = ?'); params.push(publishedDate); }
+    if (claimedRewardAmount !== undefined) { updates.push('claimedRewardAmount = ?'); params.push(Number(claimedRewardAmount)); }
+    if (claimedPageChargeAmount !== undefined) { updates.push('claimedPageChargeAmount = ?'); params.push(Number(claimedPageChargeAmount)); }
+    if (approvedPageChargeAmount !== undefined) { updates.push('approvedPageChargeAmount = ?'); params.push(Number(approvedPageChargeAmount)); }
+    if (totalClaimedAmount !== undefined) { updates.push('totalClaimedAmount = ?'); params.push(Number(totalClaimedAmount)); }
+    if (status !== undefined) { updates.push('status = ?'); params.push(status); }
+    if (currentStep !== undefined) { updates.push('currentStep = ?'); params.push(currentStep); }
+    if (internalDocNo !== undefined) { updates.push('internalDocNo = ?'); params.push(internalDocNo); }
+    if (researchDocRecNo !== undefined) { updates.push('researchDocRecNo = ?'); params.push(researchDocRecNo); }
+    if (financeDocRecNo !== undefined) { updates.push('financeDocRecNo = ?'); params.push(financeDocRecNo); }
+    if (disbursementVoucherNo !== undefined) { updates.push('disbursementVoucherNo = ?'); params.push(disbursementVoucherNo); }
+    if (blueSlipNo !== undefined) { updates.push('blueSlipNo = ?'); params.push(blueSlipNo); }
+    if (budgetExpenseCode !== undefined) { updates.push('budgetExpenseCode = ?'); params.push(budgetExpenseCode); }
+    if (actualPaidAmount !== undefined) { updates.push('actualPaidAmount = ?'); params.push(actualPaidAmount); }
+    if (paymentStatus !== undefined) { updates.push('paymentStatus = ?'); params.push(paymentStatus); }
+    if (paymentDate !== undefined) { updates.push('paymentDate = ?'); params.push(paymentDate); }
+    if (paymentTransferSlipUrl !== undefined) { updates.push('paymentTransferSlipUrl = ?'); params.push(paymentTransferSlipUrl); }
+    if (coordinatorNotes !== undefined) { updates.push('coordinatorNotes = ?'); params.push(coordinatorNotes); }
+    if (timeline !== undefined) { updates.push('timelineJson = ?'); params.push(JSON.stringify(timeline)); }
+    if (attachments !== undefined) { updates.push('attachmentsJson = ?'); params.push(JSON.stringify(attachments)); }
+    if (isOnlineReviewComplete !== undefined) { updates.push('isOnlineReviewComplete = ?'); params.push(isOnlineReviewComplete ? 1 : 0); }
+    if (deptCode !== undefined) { updates.push('deptCode = ?'); params.push(deptCode); }
+    if (docRunningNo !== undefined) { updates.push('docRunningNo = ?'); params.push(docRunningNo); }
+    if (officialDocDate !== undefined) { updates.push('officialDocDate = ?'); params.push(officialDocDate); }
+    if (disbursementDocRunningNo !== undefined) { updates.push('disbursementDocRunningNo = ?'); params.push(disbursementDocRunningNo); }
+    if (disbursementOfficialDocDate !== undefined) { updates.push('disbursementOfficialDocDate = ?'); params.push(disbursementOfficialDocDate); }
+    if (disbursementInternalDocNo !== undefined) { updates.push('disbursementInternalDocNo = ?'); params.push(disbursementInternalDocNo); }
+    if (databaseYear !== undefined) { updates.push('databaseYear = ?'); params.push(databaseYear); }
+    if (vol !== undefined) { updates.push('vol = ?'); params.push(vol); }
+    if (no !== undefined) { updates.push('no = ?'); params.push(no); }
+    if (publishMonth !== undefined) { updates.push('publishMonth = ?'); params.push(publishMonth); }
+    if (publishYear !== undefined) { updates.push('publishYear = ?'); params.push(publishYear); }
+    if (pages !== undefined) { updates.push('pages = ?'); params.push(pages); }
+
+    params.push(id);
+    const sql = `UPDATE irRewardApplication SET ${updates.join(', ')} WHERE id = ?`;
+    await c.env.DB.prepare(sql).bind(...params).run();
+
+    return c.json({ status: 'updated', id });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
 });
 
 // 5. Delete Application

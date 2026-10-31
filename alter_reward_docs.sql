@@ -1,0 +1,13 @@
+ALTER TABLE irRewardApplication ADD COLUMN isOnlineReviewComplete INTEGER DEFAULT 0;
+ALTER TABLE irRewardApplication ADD COLUMN deptCode TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN docRunningNo TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN officialDocDate TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN disbursementDocRunningNo TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN disbursementOfficialDocDate TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN disbursementInternalDocNo TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN databaseYear TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN vol TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN no TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN publishMonth TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN publishYear TEXT;
+ALTER TABLE irRewardApplication ADD COLUMN pages TEXT;
