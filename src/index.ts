@@ -2561,4 +2561,296 @@ app.post('/api/line/push-milestone', async (c) => {
   }
 });
 
+// =========================================================================
+// === AUDIT LOG ENDPOINTS & RETENTION ENGINE ===
+// =========================================================================
+
+async function ensureAuditLogTable(db: any) {
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS irAuditLog (
+      id TEXT PRIMARY KEY,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+      userId TEXT NOT NULL,
+      userName TEXT,
+      userRole TEXT,
+      action TEXT NOT NULL,
+      targetType TEXT,
+      targetId TEXT,
+      details TEXT,
+      ipAddress TEXT
+    )
+  `).run();
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_target ON irAuditLog (targetId)').run().catch(() => {});
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON irAuditLog (timestamp DESC)').run().catch(() => {});
+}
+
+// 1. Get Audit Logs with search, filters, and pagination
+app.get('/api/audit-logs', async (c) => {
+  try {
+    await ensureAuditLogTable(c.env.DB);
+    const url = new URL(c.req.url);
+    const query = url.searchParams.get('q')?.trim() || '';
+    const action = url.searchParams.get('action')?.trim() || '';
+    const targetType = url.searchParams.get('targetType')?.trim() || '';
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+    const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+    let sql = 'SELECT * FROM irAuditLog WHERE 1=1';
+    const params: any[] = [];
+
+    if (query) {
+      sql += ' AND (targetId LIKE ? OR userName LIKE ? OR details LIKE ? OR action LIKE ?)';
+      const qWildcard = `%${query}%`;
+      params.push(qWildcard, qWildcard, qWildcard, qWildcard);
+    }
+    if (action && action !== 'all') {
+      sql += ' AND action = ?';
+      params.push(action);
+    }
+    if (targetType && targetType !== 'all') {
+      sql += ' AND targetType = ?';
+      params.push(targetType);
+    }
+
+    sql += ' ORDER BY timestamp DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const { results } = await c.env.DB.prepare(sql).bind(...params).all();
+
+    // Count total for pagination
+    let countSql = 'SELECT COUNT(*) as total FROM irAuditLog WHERE 1=1';
+    const countParams: any[] = [];
+    if (query) {
+      countSql += ' AND (targetId LIKE ? OR userName LIKE ? OR details LIKE ? OR action LIKE ?)';
+      const qWildcard = `%${query}%`;
+      countParams.push(qWildcard, qWildcard, qWildcard, qWildcard);
+    }
+    if (action && action !== 'all') {
+      countSql += ' AND action = ?';
+      countParams.push(action);
+    }
+    if (targetType && targetType !== 'all') {
+      countSql += ' AND targetType = ?';
+      countParams.push(targetType);
+    }
+    const totalRow: any = await c.env.DB.prepare(countSql).bind(...countParams).first();
+
+    return c.json({
+      logs: results || [],
+      total: totalRow?.total || 0,
+      limit,
+      offset
+    });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// 2. Create Audit Log Entry
+app.post('/api/audit-logs', async (c) => {
+  try {
+    await ensureAuditLogTable(c.env.DB);
+    const body = await c.req.json();
+    const {
+      userId,
+      userName,
+      userRole,
+      action,
+      targetType = 'GENERAL',
+      targetId = '',
+      details = ''
+    } = body;
+
+    if (!action || !userId) {
+      return c.json({ error: 'Missing action or userId' }, 400);
+    }
+
+    const id = `audit-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const ipAddress = c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || '127.0.0.1';
+
+    await c.env.DB.prepare(`
+      INSERT INTO irAuditLog (id, userId, userName, userRole, action, targetType, targetId, details, ipAddress, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `).bind(
+      id,
+      userId,
+      userName || 'ผู้ใช้งาน',
+      userRole || 'researcher',
+      action,
+      targetType,
+      targetId,
+      typeof details === 'object' ? JSON.stringify(details) : String(details),
+      ipAddress
+    ).run();
+
+    return c.json({ status: 'recorded', id });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// 3. Check 24-Month Retention Status
+app.get('/api/audit-logs/check-retention', async (c) => {
+  try {
+    await ensureAuditLogTable(c.env.DB);
+    const twoYearsAgo = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000).toISOString();
+
+    const countRow: any = await c.env.DB.prepare(`
+      SELECT COUNT(*) as expiredCount, MIN(timestamp) as oldestTimestamp
+      FROM irAuditLog 
+      WHERE timestamp < ?
+    `).bind(twoYearsAgo).first();
+
+    const totalRow: any = await c.env.DB.prepare('SELECT COUNT(*) as totalCount FROM irAuditLog').first();
+
+    return c.json({
+      expiredCount: countRow?.expiredCount || 0,
+      oldestTimestamp: countRow?.oldestTimestamp || null,
+      totalCount: totalRow?.totalCount || 0,
+      cutoffDate: twoYearsAgo.split('T')[0],
+      retentionDays: 730
+    });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// 4. Download / Backup Logs Older Than 24 Months (CSV format with UTF-8 BOM)
+app.get('/api/audit-logs/backup-24m', async (c) => {
+  try {
+    await ensureAuditLogTable(c.env.DB);
+    const twoYearsAgo = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000).toISOString();
+
+    const { results } = await c.env.DB.prepare(`
+      SELECT * FROM irAuditLog 
+      WHERE timestamp < ? 
+      ORDER BY timestamp ASC
+    `).bind(twoYearsAgo).all();
+
+    const rows = results || [];
+
+    // Build CSV with UTF-8 BOM
+    const headers = ['ลำดับ', 'รหัส Log', 'วัน-เวลา', 'รหัสผู้ใช้', 'ชื่อผู้ดำเนินการ', 'บทบาท', 'กิจกรรม (Action)', 'ประเภทข้อมูล', 'เลขที่อ้างอิง/เป้าหมาย', 'รายละเอียด', 'IP Address'];
+    const csvLines = [headers.join(',')];
+
+    rows.forEach((r: any, idx: number) => {
+      const escape = (val: any) => `"${String(val || '').replace(/"/g, '""')}"`;
+      csvLines.push([
+        idx + 1,
+        escape(r.id),
+        escape(r.timestamp),
+        escape(r.userId),
+        escape(r.userName),
+        escape(r.userRole),
+        escape(r.action),
+        escape(r.targetType),
+        escape(r.targetId),
+        escape(r.details),
+        escape(r.ipAddress)
+      ].join(','));
+    });
+
+    const csvContent = '\uFEFF' + csvLines.join('\r\n');
+    const filename = `iram_audit_log_archive_prior_24months_${new Date().toISOString().split('T')[0]}.csv`;
+
+    return new Response(csvContent, {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${filename}"`
+      }
+    });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// 5. Purge Logs Older Than 24 Months (Requires Safe Confirmation)
+app.post('/api/audit-logs/purge-24m', async (c) => {
+  try {
+    await ensureAuditLogTable(c.env.DB);
+    const body = await c.req.json();
+    const { confirmed, confirmedBy, confirmedRole } = body;
+
+    if (!confirmed) {
+      return c.json({ error: 'กรุณายืนยันการสำรองข้อมูล (confirmed=true) ก่อนสั่งล้างข้อมูลเก่า' }, 400);
+    }
+
+    const twoYearsAgo = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Count before delete
+    const countRow: any = await c.env.DB.prepare(`
+      SELECT COUNT(*) as count FROM irAuditLog WHERE timestamp < ?
+    `).bind(twoYearsAgo).first();
+    const purgedCount = countRow?.count || 0;
+
+    if (purgedCount > 0) {
+      await c.env.DB.prepare('DELETE FROM irAuditLog WHERE timestamp < ?').bind(twoYearsAgo).run();
+    }
+
+    // Record an audit entry of the purge operation itself!
+    const logId = `audit-purge-${Date.now()}`;
+    const ipAddress = c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || '127.0.0.1';
+    await c.env.DB.prepare(`
+      INSERT INTO irAuditLog (id, userId, userName, userRole, action, targetType, targetId, details, ipAddress, timestamp)
+      VALUES (?, ?, ?, ?, 'PURGE_EXPIRED_LOGS', 'SYSTEM', 'irAuditLog', ?, ?, datetime('now'))
+    `).bind(
+      logId,
+      confirmedBy || 'admin',
+      confirmedBy || 'ผู้ดูแลระบบ',
+      confirmedRole || 'admin',
+      `ล้างข้อมูล Log เก่าเกิน 24 เดือน (ก่อนวันที่ ${twoYearsAgo.split('T')[0]}) จำนวน ${purgedCount} รายการ สำเร็จ`,
+      ipAddress
+    ).run();
+
+    return c.json({
+      status: 'purged',
+      purgedCount,
+      cutoffDate: twoYearsAgo.split('T')[0]
+    });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// 6. Manual Full Export of All Audit Logs (for Auditing / Off-site Storage)
+app.get('/api/audit-logs/export-all', async (c) => {
+  try {
+    await ensureAuditLogTable(c.env.DB);
+    const { results } = await c.env.DB.prepare('SELECT * FROM irAuditLog ORDER BY timestamp DESC').all();
+    const rows = results || [];
+
+    const headers = ['ลำดับ', 'รหัส Log', 'วัน-เวลา', 'รหัสผู้ใช้', 'ชื่อผู้ดำเนินการ', 'บทบาท', 'กิจกรรม (Action)', 'ประเภทข้อมูล', 'เลขที่อ้างอิง/เป้าหมาย', 'รายละเอียด', 'IP Address'];
+    const csvLines = [headers.join(',')];
+
+    rows.forEach((r: any, idx: number) => {
+      const escape = (val: any) => `"${String(val || '').replace(/"/g, '""')}"`;
+      csvLines.push([
+        idx + 1,
+        escape(r.id),
+        escape(r.timestamp),
+        escape(r.userId),
+        escape(r.userName),
+        escape(r.userRole),
+        escape(r.action),
+        escape(r.targetType),
+        escape(r.targetId),
+        escape(r.details),
+        escape(r.ipAddress)
+      ].join(','));
+    });
+
+    const csvContent = '\uFEFF' + csvLines.join('\r\n');
+    const filename = `iram_all_audit_logs_${new Date().toISOString().split('T')[0]}.csv`;
+
+    return new Response(csvContent, {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${filename}"`
+      }
+    });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 export default app;
