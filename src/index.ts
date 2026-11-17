@@ -2570,16 +2570,41 @@ async function ensureAuditLogTable(db: any) {
     CREATE TABLE IF NOT EXISTS irAuditLog (
       id TEXT PRIMARY KEY,
       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-      userId TEXT NOT NULL,
+      userId TEXT,
       userName TEXT,
       userRole TEXT,
       action TEXT NOT NULL,
       targetType TEXT,
       targetId TEXT,
       details TEXT,
-      ipAddress TEXT
+      ipAddress TEXT,
+      tableName TEXT,
+      recordId TEXT,
+      performedBy TEXT,
+      oldData TEXT,
+      newData TEXT
     )
   `).run();
+
+  // Self-healing schema migration for existing D1 databases
+  const alterColumns = [
+    'ALTER TABLE irAuditLog ADD COLUMN userId TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN userName TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN userRole TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN targetType TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN targetId TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN details TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN ipAddress TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN tableName TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN recordId TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN performedBy TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN oldData TEXT',
+    'ALTER TABLE irAuditLog ADD COLUMN newData TEXT'
+  ];
+  for (const alter of alterColumns) {
+    await db.prepare(alter).run().catch(() => {});
+  }
+
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_target ON irAuditLog (targetId)').run().catch(() => {});
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON irAuditLog (timestamp DESC)').run().catch(() => {});
 }
@@ -2667,10 +2692,14 @@ app.post('/api/audit-logs', async (c) => {
 
     const id = `audit-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const ipAddress = c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || '127.0.0.1';
+    const detailStr = typeof details === 'object' ? JSON.stringify(details) : String(details);
 
     await c.env.DB.prepare(`
-      INSERT INTO irAuditLog (id, userId, userName, userRole, action, targetType, targetId, details, ipAddress, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      INSERT INTO irAuditLog (
+        id, userId, userName, userRole, action, targetType, targetId, details, ipAddress,
+        tableName, recordId, performedBy, newData, timestamp
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).bind(
       id,
       userId,
@@ -2679,8 +2708,12 @@ app.post('/api/audit-logs', async (c) => {
       action,
       targetType,
       targetId,
-      typeof details === 'object' ? JSON.stringify(details) : String(details),
-      ipAddress
+      detailStr,
+      ipAddress,
+      targetType,
+      targetId,
+      userName || userId,
+      detailStr
     ).run();
 
     return c.json({ status: 'recorded', id });
