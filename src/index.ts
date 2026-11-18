@@ -850,6 +850,87 @@ app.get('/api/rewards/check-duplicate', async (c) => {
   }
 });
 
+// 1.1 Public Aggregate Summary (For Dashboard & Guest overview without leaking PII)
+app.get('/api/rewards/public-summary', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(`
+      SELECT 
+        status, 
+        totalClaimedAmount, 
+        actualPaidAmount, 
+        claimedRewardAmount, 
+        claimedPageChargeAmount, 
+        quartile
+      FROM irRewardApplication
+      WHERE status != 'draft'
+    `).all();
+
+    const apps = results || [];
+
+    let totalApplications = apps.length;
+    let totalRequestedAmount = 0;
+    let paidAmount = 0;
+    let paidCount = 0;
+    let pendingAmount = 0;
+    let pendingCount = 0;
+    let rewardAmount = 0;
+    let pageChargeAmount = 0;
+
+    const quartileCounts: Record<string, number> = {
+      Q1_Tier1: 0,
+      Q1: 0,
+      Q2: 0,
+      Q3: 0,
+      Q4: 0,
+      TCI_1: 0,
+      TCI_2: 0,
+    };
+
+    for (const a of apps) {
+      const tot = Number(a.totalClaimedAmount) || 0;
+      const actualPaid = Number(a.actualPaidAmount) || 0;
+      const rew = Number(a.claimedRewardAmount) || 0;
+      const page = Number(a.claimedPageChargeAmount) || 0;
+
+      totalRequestedAmount += tot;
+      rewardAmount += rew;
+      pageChargeAmount += page;
+
+      if (a.status === 'paid') {
+        paidCount++;
+        paidAmount += (actualPaid > 0 ? actualPaid : tot);
+      } else {
+        pendingCount++;
+        pendingAmount += tot;
+      }
+
+      const q = a.quartile;
+      if (q && quartileCounts[q] !== undefined) {
+        quartileCounts[q]++;
+      } else if (q === 'Q1') {
+        quartileCounts.Q1++;
+      }
+    }
+
+    const payload = {
+      totalApplications,
+      totalRequestedAmount,
+      paidAmount,
+      paidCount,
+      pendingAmount,
+      pendingCount,
+      rewardAmount,
+      pageChargeAmount,
+      quartileCounts,
+    };
+
+    c.header('Cache-Control', 'public, max-age=60, s-maxage=60');
+    return c.json(payload);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 // 2. Get All Reward Applications
 app.get('/api/rewards', async (c) => {
   try {
