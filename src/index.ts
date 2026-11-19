@@ -2646,11 +2646,14 @@ app.post('/api/line/push-milestone', async (c) => {
 // === AUDIT LOG ENDPOINTS & RETENTION ENGINE ===
 // =========================================================================
 
+const REWARD_LOG_SCOPE = "(systemName = 'iram-reward-system' OR userId IS NOT NULL)";
+
 async function ensureAuditLogTable(db: any) {
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS irAuditLog (
       id TEXT PRIMARY KEY,
       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+      systemName TEXT,
       userId TEXT,
       userName TEXT,
       userRole TEXT,
@@ -2669,6 +2672,7 @@ async function ensureAuditLogTable(db: any) {
 
   // Self-healing schema migration for existing D1 databases
   const alterColumns = [
+    'ALTER TABLE irAuditLog ADD COLUMN systemName TEXT',
     'ALTER TABLE irAuditLog ADD COLUMN userId TEXT',
     'ALTER TABLE irAuditLog ADD COLUMN userName TEXT',
     'ALTER TABLE irAuditLog ADD COLUMN userRole TEXT',
@@ -2688,6 +2692,7 @@ async function ensureAuditLogTable(db: any) {
 
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_target ON irAuditLog (targetId)').run().catch(() => {});
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON irAuditLog (timestamp DESC)').run().catch(() => {});
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_audit_log_system_ts ON irAuditLog (systemName, timestamp DESC)').run().catch(() => {});
 }
 
 // 1. Get Audit Logs with search, filters, and pagination
@@ -2698,10 +2703,12 @@ app.get('/api/audit-logs', async (c) => {
     const query = url.searchParams.get('q')?.trim() || '';
     const action = url.searchParams.get('action')?.trim() || '';
     const targetType = url.searchParams.get('targetType')?.trim() || '';
+    const scope = url.searchParams.get('scope')?.trim() || 'reward';
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
-    let sql = 'SELECT * FROM irAuditLog WHERE 1=1';
+    const whereBase = scope === 'all' ? '1=1' : REWARD_LOG_SCOPE;
+    let sql = `SELECT * FROM irAuditLog WHERE ${whereBase}`;
     const params: any[] = [];
 
     if (query) {
@@ -2724,7 +2731,7 @@ app.get('/api/audit-logs', async (c) => {
     const { results } = await c.env.DB.prepare(sql).bind(...params).all();
 
     // Count total for pagination
-    let countSql = 'SELECT COUNT(*) as total FROM irAuditLog WHERE 1=1';
+    let countSql = `SELECT COUNT(*) as total FROM irAuditLog WHERE ${whereBase}`;
     const countParams: any[] = [];
     if (query) {
       countSql += ' AND (targetId LIKE ? OR userName LIKE ? OR details LIKE ? OR action LIKE ?)';
@@ -2777,10 +2784,10 @@ app.post('/api/audit-logs', async (c) => {
 
     await c.env.DB.prepare(`
       INSERT INTO irAuditLog (
-        id, userId, userName, userRole, action, targetType, targetId, details, ipAddress,
+        id, systemName, userId, userName, userRole, action, targetType, targetId, details, ipAddress,
         tableName, recordId, performedBy, newData, timestamp
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      VALUES (?, 'iram-reward-system', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).bind(
       id,
       userId,
@@ -2803,7 +2810,7 @@ app.post('/api/audit-logs', async (c) => {
   }
 });
 
-// 3. Check 24-Month Retention Status
+// 3. Check 24-Month Retention Status (Scoped to iram-reward-system only)
 app.get('/api/audit-logs/check-retention', async (c) => {
   try {
     await ensureAuditLogTable(c.env.DB);
@@ -2812,24 +2819,27 @@ app.get('/api/audit-logs/check-retention', async (c) => {
     const countRow: any = await c.env.DB.prepare(`
       SELECT COUNT(*) as expiredCount, MIN(timestamp) as oldestTimestamp
       FROM irAuditLog 
-      WHERE timestamp < ?
+      WHERE timestamp < ? AND ${REWARD_LOG_SCOPE}
     `).bind(twoYearsAgo).first();
 
-    const totalRow: any = await c.env.DB.prepare('SELECT COUNT(*) as totalCount FROM irAuditLog').first();
+    const totalRow: any = await c.env.DB.prepare(`
+      SELECT COUNT(*) as totalCount FROM irAuditLog WHERE ${REWARD_LOG_SCOPE}
+    `).first();
 
     return c.json({
       expiredCount: countRow?.expiredCount || 0,
       oldestTimestamp: countRow?.oldestTimestamp || null,
       totalCount: totalRow?.totalCount || 0,
       cutoffDate: twoYearsAgo.split('T')[0],
-      retentionDays: 730
+      retentionDays: 730,
+      scope: 'iram-reward-system'
     });
   } catch (e: any) {
     return c.json({ error: e.message }, 500);
   }
 });
 
-// 4. Download / Backup Logs Older Than 24 Months (CSV format with UTF-8 BOM)
+// 4. Download / Backup Logs Older Than 24 Months (Scoped to iram-reward-system, CSV with UTF-8 BOM)
 app.get('/api/audit-logs/backup-24m', async (c) => {
   try {
     await ensureAuditLogTable(c.env.DB);
@@ -2837,7 +2847,7 @@ app.get('/api/audit-logs/backup-24m', async (c) => {
 
     const { results } = await c.env.DB.prepare(`
       SELECT * FROM irAuditLog 
-      WHERE timestamp < ? 
+      WHERE timestamp < ? AND ${REWARD_LOG_SCOPE}
       ORDER BY timestamp ASC
     `).bind(twoYearsAgo).all();
 
@@ -2878,7 +2888,7 @@ app.get('/api/audit-logs/backup-24m', async (c) => {
   }
 });
 
-// 5. Purge Logs Older Than 24 Months (Requires Safe Confirmation)
+// 5. Purge Logs Older Than 24 Months (Scoped to iram-reward-system + Batch Delete LIMIT 500)
 app.post('/api/audit-logs/purge-24m', async (c) => {
   try {
     await ensureAuditLogTable(c.env.DB);
@@ -2890,35 +2900,52 @@ app.post('/api/audit-logs/purge-24m', async (c) => {
     }
 
     const twoYearsAgo = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000).toISOString();
+    const BATCH_LIMIT = 500;
+    let purgedCount = 0;
 
-    // Count before delete
-    const countRow: any = await c.env.DB.prepare(`
-      SELECT COUNT(*) as count FROM irAuditLog WHERE timestamp < ?
-    `).bind(twoYearsAgo).first();
-    const purgedCount = countRow?.count || 0;
+    // Batch Delete (LIMIT 500 per iteration) to prevent long D1/SQLite write locks on shared table
+    while (true) {
+      const delRes: any = await c.env.DB.prepare(`
+        DELETE FROM irAuditLog
+        WHERE id IN (
+          SELECT id FROM irAuditLog
+          WHERE timestamp < ? AND ${REWARD_LOG_SCOPE}
+          ORDER BY timestamp ASC
+          LIMIT ${BATCH_LIMIT}
+        )
+      `).bind(twoYearsAgo).run();
 
-    if (purgedCount > 0) {
-      await c.env.DB.prepare('DELETE FROM irAuditLog WHERE timestamp < ?').bind(twoYearsAgo).run();
+      const changes = delRes?.meta?.changes || 0;
+      purgedCount += changes;
+      if (changes < BATCH_LIMIT) break;
     }
 
     // Record an audit entry of the purge operation itself!
     const logId = `audit-purge-${Date.now()}`;
     const ipAddress = c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || '127.0.0.1';
+    const purgeDetails = `ล้างข้อมูล Log ระบบเงินรางวัลที่เก่าเกิน 24 เดือน (ก่อนวันที่ ${twoYearsAgo.split('T')[0]}) จำนวน ${purgedCount} รายการ สำเร็จ (Batch LIMIT 500)`;
     await c.env.DB.prepare(`
-      INSERT INTO irAuditLog (id, userId, userName, userRole, action, targetType, targetId, details, ipAddress, timestamp)
-      VALUES (?, ?, ?, ?, 'PURGE_EXPIRED_LOGS', 'SYSTEM', 'irAuditLog', ?, ?, datetime('now'))
+      INSERT INTO irAuditLog (
+        id, systemName, userId, userName, userRole, action, targetType, targetId, details, ipAddress,
+        tableName, recordId, performedBy, newData, timestamp
+      )
+      VALUES (?, 'iram-reward-system', ?, ?, ?, 'PURGE_EXPIRED_LOGS', 'SYSTEM', 'irAuditLog', ?, ?, 'SYSTEM', 'irAuditLog', ?, ?, datetime('now'))
     `).bind(
       logId,
       confirmedBy || 'admin',
       confirmedBy || 'ผู้ดูแลระบบ',
       confirmedRole || 'admin',
-      `ล้างข้อมูล Log เก่าเกิน 24 เดือน (ก่อนวันที่ ${twoYearsAgo.split('T')[0]}) จำนวน ${purgedCount} รายการ สำเร็จ`,
-      ipAddress
+      purgeDetails,
+      ipAddress,
+      confirmedBy || 'ผู้ดูแลระบบ',
+      purgeDetails
     ).run();
 
     return c.json({
       status: 'purged',
       purgedCount,
+      batchLimit: BATCH_LIMIT,
+      scope: 'iram-reward-system',
       cutoffDate: twoYearsAgo.split('T')[0]
     });
   } catch (e: any) {
@@ -2926,11 +2953,13 @@ app.post('/api/audit-logs/purge-24m', async (c) => {
   }
 });
 
-// 6. Manual Full Export of All Audit Logs (for Auditing / Off-site Storage)
+// 6. Manual Full Export of All Audit Logs (Scoped to iram-reward-system)
 app.get('/api/audit-logs/export-all', async (c) => {
   try {
     await ensureAuditLogTable(c.env.DB);
-    const { results } = await c.env.DB.prepare('SELECT * FROM irAuditLog ORDER BY timestamp DESC').all();
+    const { results } = await c.env.DB.prepare(`
+      SELECT * FROM irAuditLog WHERE ${REWARD_LOG_SCOPE} ORDER BY timestamp DESC
+    `).all();
     const rows = results || [];
 
     const headers = ['ลำดับ', 'รหัส Log', 'วัน-เวลา', 'รหัสผู้ใช้', 'ชื่อผู้ดำเนินการ', 'บทบาท', 'กิจกรรม (Action)', 'ประเภทข้อมูล', 'เลขที่อ้างอิง/เป้าหมาย', 'รายละเอียด', 'IP Address'];
